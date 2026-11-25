@@ -37,11 +37,9 @@ If the OS swaps out Process $P_1$ to disk while it still has an active/pending D
   - **Double Buffering (Kernel Buffers)**: Perform all DMA into fixed kernel-space buffers, then copy to user memory only when the process is resident.
 
 #### IN DETAIL
-Suppose Process A asks the disk controller: *"Fetch 4 KB from the disk and drop it into physical RAM room #5."* The disk takes 10 ms, so the OS puts Process A to sleep and swaps Process A out to disk to make room for Process B. The OS hands physical room #5 to Process B!
-
-Ten milliseconds later, the clueless disk controller finishes fetching Process A's data and faithfully writes it straight into **physical room #5**—smashing right over Process B's variables or code! Process B crashes unpredictably or reads Process A's private data!
-
-That's why OS kernels either **pin** I/O pages in RAM so they cannot be swapped out during active DMA, or **double-buffer** I/O through pinned kernel memory buffers first.
+Swapping out a process while asynchronous DMA I/O remains in flight violates kernel/device buffer ownership invariants:
+- **Orphaned Physical DMA Frame Hazard**: Once the scheduler authorizes a disk/NIC controller via physical buffer address `PA_buf`, the DMA engine transfers incoming bytes asynchronously over the memory bus completely independent of OS scheduling or page-table moves. If the OS swaps out Process $P_1$ and reassigns `PA_buf` to Process $P_2$, arriving DMA traffic silently overwrites $P_2$'s live data (**silent memory corruption**).
+- **Canonical Kernel Defenses**: Production OSes either **pin (`mlock`/wire)** user DMA buffers in non-swappable physical frames for the I/O lifetime, or **double-buffer (bounce-buffer)** transfers through permanently pinned kernel space before copying safely into pageable user memory upon completion.
 
 ---
 
@@ -67,10 +65,9 @@ Implementing demand paging requires OS/software support beyond basic page tables
    - *Solution*: Software uses hardware status/tracking records recording which registers were modified and by how much, **undoing partial register side effects** before restarting the instruction.
 
 #### IN DETAIL
-Think of a page fault like a sudden power outage hitting right in the middle of executing a single assembly instruction:
-- **Easy case (`ADD A, B -> C`)**: Suppose `C` isn't in RAM when storing the answer! Easy—just load `C`'s page from disk and **restart `ADD A, B -> C` from the top** (since `A` and `B` weren't overwritten).
-- **Hard case #1 (`MVC` block copy of 256 bytes where source and destination overlap)**: Suppose bytes `0..100` overwrite part of the source, and byte `101` page-faults! You can't simply restart from byte 0 because bytes `0..100` of the source are already destroyed! So the system either checks *both ends* of source & destination first so any fault happens *before* copying begins, or saves backup values!
-- **Hard case #2 (`MOV (R2)+, -(R3)`)**: If `R2` already added `+4` before the write to `(R3)` faulted, restarting without undoing `R2 -= 4` would silently skip 4 bytes! The OS/hardware status word records partial register changes so the page-fault handler **rolls back the registers** before restarting!
+Beyond MMU **Valid-Invalid (`P`)** PTE bits and swap storage, **Demand Paging** demands precise hardware **instruction-restartability** alongside stateful kernel recovery structures:
+- **Re-Executing Faulting Machine Instructions**: When a valid non-resident page triggers a fault mid-execution (`Instruction Fetch` or `Operand Load/Store`), the trap handler must save the architectural state at the *exact faulting instruction*, suspend the process during multi-millisecond swap I/O, populate the PTE, and restart execution identically. CISC multi-address instructions (`MVC`, auto-increment pointers like `MOV (R0)+, -(R1)`) that partially mutate registers/memory *before* hitting a second-operand page fault require either microarchitectural pre-probing or temporary shadow-register state restoration to prevent corrupted partial side effects.
+- **Kernel Structures**: The OS must maintain Virtual Memory Area (`VMA` / segment) descriptors to distinguish illegal `SIGSEGV` accesses from valid zero-fill/swap/file-backed pages, plus frame tables, free-frame lists, and dirty-page cleanout (`pdflush`/swap daemon) policies.
 
 ---
 
@@ -136,11 +133,9 @@ void Disk_Interrupt_Handler(Process *proc, VPN vpn, PFN frame) {
 ```
 
 #### IN DETAIL
-Follow the story of a single memory access when **both** the TLB and RAM miss:
-1. **Trap!**: CPU checks the software-managed TLB, doesn't find `VPN`, and traps into Kernel Mode.
-2. **Page Table Walk**: The OS inspects the process's page table. Suppose `present == 0`—the page is sitting out on slow disk/swap!
-3. **Never Wait Idle!**: Loading a page from disk takes ~10 ms (tens of millions of CPU cycles!). So the OS allocates a physical frame (evicting a victim if RAM is full), **starts an asynchronous DMA disk read**, marks the faulting process **`BLOCKED`**, and **immediately runs some other `READY` process on the CPU**!
-4. **Disk Interrupt & Resume**: 10 ms later, the disk controller fires an interrupt saying *"Done!"*. The OS marks `pte->present = 1` and moves our process back to `READY`. When the scheduler picks it again, the CPU **re-executes the exact instruction that trapped**—this time finding the page in RAM, updating the TLB, and running smoothly!
+Handling a combined **TLB-Miss and Page-Fault** on architectures with software-managed TLBs exposes the boundary between **lightweight synchronous refill** and **asynchronous disk-blocking context switches**:
+- **Fast-Path Software TLB Miss**: On a TLB miss whose target PTE has `Present = 1` in the in-memory page table, the trap handler simply inserts `(VPN -> PFN)` into a hardware TLB slot and immediately executes `ReturnFromTrap` (`iret`) without context switching or scheduling (~tens of nanoseconds).
+- **Slow-Path Page Fault (`Present = 0`)**: Because disk reads take milliseconds ($10^6\times$ longer than RAM accesses), the fault handler initiates asynchronous DMA read (`disk_read`), clears `Present` until completion, transitions the faulting thread to **`Blocked`** state, and invokes the scheduler to run other ready processes—resuming only when the disk ISR marks `Present = 1`, inserts the PTE/TLB mapping, moves the process to `Ready`, and re-executes the identical faulting instruction.
 
 ---
 
@@ -164,10 +159,9 @@ Follow the story of a single memory access when **both** the TLB and RAM miss:
    - **Local / Working-Set / PFF Frame Allocation**: Use local replacement (preventing one thrashing process from stealing another's frames) and enforce the **Working-Set Model** or **Page-Fault Frequency (PFF)** algorithm so a process runs *only* if enough frames exist for its working set.
 
 #### IN DETAIL
-Think of 10 chefs trying to cook simultaneously in a kitchen with **only 4 cutting boards** (RAM frames)!
-Instead of cooking, every 2 seconds Chef A steals Chef B's cutting board, washes it (disk page-out), puts their vegetables on it (disk page-in), and before making 1 chop, Chef C steals it back! **Zero meals get cooked** (CPU utilization crashes to ~5%!) while the sink (disk) runs at 100%!
-- **How the OS catches it**: It notices *"Wait—I just allowed MORE chefs into the kitchen (higher MPL), yet meals-per-hour suddenly DROPPED off a cliff while the disk is thrashing nonstop!"*
-- **The Fix**: Kick 5 chefs out to the hallway temporarily (**medium-term scheduler swaps them out**). Immediately the remaining 5 chefs keep their cutting boards steady and CPU productivity jumps right back up!
+**Thrashing** is a positive-feedback collapse in virtual-memory systems driven by physical frame overcommitment (**$\sum \text{WorkingSet}_i > M_{\text{frames}}$**):
+- **Failure Mechanism**: Too many concurrent processes run with insufficient resident frames relative to their active locality sets. Every context quickly faults on evicted active pages, immediately suspending all runnable threads inside swap I/O queues. When traditional naive CPU utilization monitors see CPU utilization plummeting near zero and attempt recovery by **increasing admission (spawning/swapping in *more* processes)**, frame pressure sharpens further and disk paging throughput saturates while useful instruction throughput collapses.
+- **Working-Set / Page-Fault Frequency (PFF) Mitigation**: Detecting rising PFF alongside collapsing CPU busy-time triggers the **Medium-Term Scheduler** to intentionally suspend lowest-priority processes (`swap-out`), restoring each surviving active process's full working set inside RAM.
 
 ---
 
@@ -183,9 +177,9 @@ Instead of cooking, every 2 seconds Chef A steals Chef B's cutting board, washes
 - **Justification**: Global frame allocation allows a process whose working set is actively growing to claim free or infrequently used frames from other processes rather than thrashing inside a rigid fixed partition. By dynamically adjusting each process's frame count to match its current locality needs, global allocation reduces total page faults, improves memory utilization, and yields higher overall system throughput than local allocation.
 
 #### IN DETAIL
-Imagine two cooks sharing a 10-burner stove:
-- **Local allocation** draws a permanent tape line down the middle: *"Cook A gets 5 burners forever, Cook B gets 5 burners forever."* Even if Cook B is just simmering 1 small pot and has 4 burners idle while Cook A desperately needs 7 burners, Cook A isn't allowed to touch Cook B's 4 empty burners!
-- **Global allocation** lets Cook A borrow idle burners dynamically whenever Cook A's workload spikes—keeping total kitchen productivity (**system throughput**) higher! *(Catch: one greedy runaway process can steal too many frames from a neighbor unless minimum frame limits / working-set controls are maintained.)*
+**Global vs. Local Page Replacement Allocation** trades strict inter-process **performance isolation** against dynamic **aggregate memory efficiency**:
+- **Why Global Allocation Achieves Higher Throughput**: Application working sets expand and contract dynamically across execution phases (compile parsing vs. linking, heap bursts vs. idle waits). Global replacement pools free and least-recently-used frames across the entire system, dynamically shifting unused frames from quiescent processes to temporarily memory-hungry active processes—dramatically cutting total page-fault rates and raising aggregate CPU throughput.
+- **Inherent Stability Trade-off**: Because one aggressively faulting workload can steal frames belonging to well-behaved neighbors, local or minimum-guaranteed working-set floors (like Linux cgroup `memory.min` / per-process WS caps) are paired in multi-tenant environments to bound noisy-neighbor thrashing.
 
 ---
 
@@ -214,14 +208,9 @@ Imagine two cooks sharing a 10-burner stove:
   $$= 18 + 6 + 480,004 = \mathbf{480,028\text{ nanoseconds}}$$
 
 #### IN DETAIL
-Follow the exact phrasing of the problem: *"and then the reference is started again"*!
-1. You look in the cache first (**20 ns**).
-2. If it's in RAM (6% chance), you spend **60 ns** loading the word into cache, and **restart the reference (+20 ns)** = **100 ns** total.
-3. If it's on Disk (4% chance), you spend **12,000,000 ns** fetching from disk, **60 ns** copying into cache, and **restart the reference (+20 ns)** = **12,000,100 ns** total.
-Multiplying out: $18 + 6 + 480,004 = \mathbf{480,028\text{ ns}}$! Notice how 99.995% of the average access time comes purely from that 4% disk fault rate!
-
-**Note on 2022 Key Correction**:
-- The scanned 2022 key mistakenly reported `4.8 ms` (`4,800,000 ns`, off by a factor of $10\times$!). Computing carefully gives $0.9(20) + 0.06(100) + 0.04(12,000,100) = 18 + 6 + 480,004 = \mathbf{480,028\text{ ns}}$.
+Multi-tier memory latency evaluation (**Cache $\to$ Main Memory $\to$ Swap Disk**) illustrates how tiny **page-fault probabilities ($p$)** dominate **Effective Access Time (EAT)** due to a $10^5\times$–$10^6\times$ mechanical speed gap:
+- **Restart-Semantics Model**: When a memory reference misses both SRAM cache ($20\text{ ns}$, rate $1-H_c = 0.1$) and RAM (page fault, rate $p = 1 - H_m = 0.04$), the hardware first burns the initial lookup + OS swap latency ($12\text{ ms}$) to page the missing block into DRAM, and then **restarts the memory cycle cleanly**, paying a fresh cache miss ($20\text{ ns}$) plus RAM-to-cache refill ($120\text{ ns}$) before serving the datum.
+- **Scale Sensitivity**: Even at $96\%$ RAM residency, $0.04 \times 12,000,000\text{ ns} = 480,000\text{ ns}$ crushes the $28\text{ ns}$ cache/RAM terms completely—explaining why real demand-paged systems must maintain page-fault frequencies below $p < 10^{-5}$ to avoid crippling slowdowns.
 
 ---
 
@@ -271,15 +260,9 @@ Multiplying out: $18 + 6 + 480,004 = \mathbf{480,028\text{ ns}}$! Notice how 99.
 - **Recommendation**: Recommend **LRU** (or an efficient Clock approximation in real hardware). Unlike FIFO—which exhibits **Belady's Anomaly** on Trace 2 (faults **rose from 9 to 10** when RAM increased from 3 to 4 pages!)—LRU is a stack algorithm guaranteed **never** to suffer Belady's Anomaly and exploits temporal locality effectively (beating FIFO on Trace 1 at 3 frames and Trace 2 at 4 frames).
 
 #### IN DETAIL
-Look at **Trace 2** (`1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5`)—that's the famous textbook sequence specifically constructed to expose **Belady's Anomaly** in FIFO!
-- With **3 frames**, FIFO suffered **9 faults** (getting lucky hits on `1, 2` and `5` at the end!).
-- You buy more RAM (**4 frames**), expecting fewer faults—and FIFO actually gets **WORSE (10 faults!)** because with 4 frames, `1` and `2` survived just long enough for `5` to evict `1` right before `1` was accessed, triggering a chain reaction of misses!
-- **LRU** is mathematically guaranteed to be **anomaly-free**: adding more RAM frames can *never* increase page faults under LRU!
-
-**Why FIFO Also Lost on Trace 1 Alone (2023 Q2b Check)**:
-Look closely at why FIFO stumbled right at step 6 (`3` arrives) and step 7 (`0` arrives):
-- Pages `0` and `1` were just actively used (`0, 1, 2, 0, 1`), yet FIFO kicked `0` out simply because `0` arrived first—forcing an immediate extra page fault on the very next instruction when `0` was needed again, which then kicked `1` out right before `1` was needed!
-- **LRU** recognized that `2` hadn't been touched since step 3, evicted `2` instead, and kept `0` and `1` warm in memory—cutting misses from **7 down to 5**!
+Page replacement policies differ crucially on whether they obey the **Inclusion Property (Stack Algorithms)**:
+- **Belady's Anomaly in FIFO**: FIFO evicts purely by **resident insertion timestamp**, completely ignoring recent access frequency (**temporal locality**). A frequently referenced page remains on the head of the queue regardless of hits (`1, 2`), causing non-monotonic fault counts where expanding RAM from 3 frames to 4 reshuffles eviction cadence unfavorably (**9 faults $\to$ 10 faults** on `1,2,3,4,1,2,5,1,2,3,4,5`).
+- **Stack Property Guarantee (LRU / Optimal)**: At every reference step $t$, the set of resident pages inside a $k$-frame LRU cache is strictly a subset of the pages inside a $(k+1)$-frame LRU cache ($M_t(k) \subseteq M_t(k+1)$). Consequently, increasing physical frames can *never* raise page faults under LRU or Belady's Optimal algorithm.
 
 ---
 
@@ -326,10 +309,9 @@ PFN evictPages() {
     - The clock hand sweeps a full circle clearing all `reference_bit`s from `1` to `0`, and returns to the **exact starting frame (the oldest loaded/scanned frame)**—evicting pages in **strict FIFO order**! *(Similarly, if all pages have `R == 0`, it also picks the oldest hand position directly like FIFO.)*
 
 #### IN DETAIL
-Think of the **Clock Algorithm** like a security guard walking around a circular hallway of rooms checking whether anyone is awake (`R = 1` means *"used recently"*, `R = 0` means *"sleeping / untouched"*):
-- If the guard checks Room #1 and sees `R = 1`: *"Okay, you get a second chance!"*—the guard flips the light switch off (`R = 0`) and walks to Room #2.
-- If the page isn't touched before the guard makes a full lap back to Room #1, `R` will still be `0`—so the guard evicts Room #1!
-- **When does it act just like plain FIFO?** Suppose *every single page* in RAM is actively used (`R = 1, 1, 1, 1`) before the next page fault! The guard walks a full circle flipping every switch (`0, 0, 0, 0`) and lands right back on **the oldest page it started at**—literally executing FIFO!
+The **Second-Chance (Clock) Algorithm** approximates LRU cleanly in kernel software with $O(1)$ per-hit hardware cost using a single MMU **Reference Bit (`R`)**:
+- **Circular Scan Invariant**: Instead of paying expensive heap/doubly-linked-list pointer updates on every CPU memory access (impossible at nanosecond cache speeds), MMU hardware simply flips `R = 1` on read/write. Upon page fault, the Clock hand inspects frames around a circular buffer: encountering `R = 1` clears `R = 0` (granting one full sweep chance) and advances; encountering `R = 0` selects the victim immediately.
+- **Degeneration to Pure FIFO**: When the active working set is accessed densely enough within one clock sweep that *every* frame holds `R = 1`, the hand clears all $M$ bits through one full revolution and evicts whichever frame stood initially at the oldest pointer position—reducing identically to FIFO.
 
 ---
 
@@ -369,9 +351,13 @@ Think of the **Clock Algorithm** like a security guard walking around a circular
 3. **Selected Victim Page**: **Page `B`** (the sole page in class `(0, 0)`).
 
 #### IN DETAIL
-Look at why the question listed **load times**: normally a clock hand points at the **oldest page in memory (`N`, load time = 3)**.
-- In **Enhanced Second Chance**, Pass 1 asks: *"Is there ANY page with `(R=0, M=0)` (not recently used AND clean so we don't even have to pay for a disk write)?"*
-- Watch the clock scan in load-time order (`N -> G -> H -> F -> A -> L -> C -> B`): it skips every `(1,1)`, `(1,0)`, and `(0,1)` until it reaches **`B` (`(0,0)`)**!
-- Because `B` is in the highest-priority replacement class `(0,0)`, **Page `B` is evicted immediately on Pass 1** (even though `B` was loaded most recently at time 32!), and **no reference bits need to be cleared**!
+**Enhanced Second Chance (NRU / Two-Bit Clock)** improves replacement decisions by pairing recency (`R`) with writeback cost (`M` / Dirty Bit) into four hierarchical priority classes:
+- **Four-Class Lexicographic Ordering `(R, M)`**:
+  - Class `(0, 0)`: Recently unused and **clean** $\implies$ zero disk write needed before reuse (optimal victim).
+  - Class `(0, 1)`: Recently unused, **dirty** $\implies$ requires asynchronous swap writeback prior to reuse.
+  - Class `(1, 0)`: Actively referenced, **clean**.
+  - Class `(1, 1)`: Actively referenced, **dirty** $\implies$ highest retention priority.
+- **Tie-Breaking by Sweep / FIFO Arrival**: The clock hand scans cyclically starting from the oldest candidate pointer (`load time = 3`, page `N`), sweeping up to four passes looking for the lowest non-empty `(R, M)` class while decaying `R = 1 -> 0` only during search passes—minimizing total swap disk writes alongside miss rate.
 
 ---
+

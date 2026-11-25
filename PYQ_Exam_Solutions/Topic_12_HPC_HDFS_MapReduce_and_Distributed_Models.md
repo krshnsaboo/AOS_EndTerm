@@ -43,9 +43,9 @@
    - **Gang Scheduling** dispatches all cooperating parallel tasks/threads **simultaneously** across nodes during coordinated time slices, ensuring barriers and tight lockstep exchanges proceed without staggered stalls.
 
 #### IN DETAIL
-Imagine 1,000 rowers in one giant dragon boat (`MPI_Barrier()` every 10 strokes):
-- Under normal independent desktop OS scheduling, Node #42 decides to take a coffee break while 999 rowers wait frozen with oars in the air (**synchronization stall!**). By the time #42 comes back, Node #7 takes a break!
-- **Gang Scheduling** blows a single whistle across every node at once so *all 1,000 cooperating processes* run at the exact same millisecond—and all rest at the same millisecond!
+Scaling supercomputing across thousands of compute units reflects a sharp transition from **hardware cache coherence** to **explicit message-passing clusters** paired with **coordinated barrier scheduling**:
+- **UMA/NUMA OpenMP vs. Cluster MPI**: Shared-memory machines simplify programming via coherent pointers (`#pragma omp`), yet physical snooping/directory coherence hardware degrades past a single node socket/NUMA domain. Massive clusters assemble commodity independent-memory nodes over ultra-low-latency RDMA interconnects (**InfiniBand/RoCEv2**), forcing programmers to partition data explicitly via **MPI** two-sided/collective primitives (`MPI_Bcast`, `MPI_Allreduce`).
+- **Gang Scheduling Necessity**: Tightly coupled bulk-synchronous MPI jobs execute frequent global barriers (`MPI_Barrier()`). If independent per-node desktop OSes deschedule just *one* rank out of 1,000 concurrently due to background daemons or asynchronous timer skew, the other 999 cores stall idle at the barrier—multiplying effective latency massively unless the cluster runs synchronized **Gang / Co-Scheduling** across all nodes simultaneously.
 
 ---
 
@@ -69,9 +69,9 @@ Given: $T_1 = 100\text{ hrs}$, serial fraction $(1 - p) = \frac{10}{100} = \math
    - Instead of shrinking the old problem, scientists run a **$100\times$ larger parallel workload** in the same parallel window: $S_{\text{Gustafson}}(100) = 0.10 + 0.90(100) = \mathbf{90.1\times}$ (linear scaling with $N$!).
 
 #### IN DETAIL
-Look closely at why both laws are true simultaneously:
-- **Amdahl** asks: *"How much faster can I finish this EXACT fixed 100-hour job?"* Even if God gives you a 1,000,000-core machine for free, that non-parallel 10-hour serial step still takes **10 full hours**, capping speedup hard at **$10\times$**!
-- **Gustafson** asks: *"If I buy 100 cores, why run a tiny fixed simulation? Why not simulate weather at 100× higher resolution in that same time?"* Now the parallel portion expands with $N$, achieving **$90.1\times$ useful throughput**!
+**Amdahl's Law** and **Gustafson's Law** describe complementary scaling boundaries depending on whether **problem size remains constant** or scales with hardware:
+- **Amdahl's Law (Fixed-Problem Strong Scaling)**: Fixes total sequential problem workload $W = S + P$. Because the non-parallelizable serial component ($1 - p$) never shrinks with processor count $N$, total parallel execution time approaches $(1 - p) T_1$ asymptotically, establishing a strict upper speedup ceiling $\lim_{N\to\infty} S(N) = \frac{1}{1 - p}$ (e.g., $10\%$ serial fraction hard-caps speedup forever at $10\times$ even with infinite cores!).
+- **Gustafson's Law (Scaled-Problem Weak Scaling)**: Observes empirically that supercomputer users scale workload size proportionally with core count ($P_{\text{scaled}} = N \cdot p$) to run higher-resolution simulations within a *fixed wall-clock budget*. Because serial time stays nearly constant relative to the $N$-fold enlarged parallel compute block, scaled speedup grows linearly: $S_{\text{scaled}}(N) = (1 - p) + N \cdot p$.
 
 ---
 
@@ -96,9 +96,9 @@ Look closely at why both laws are true simultaneously:
    - **Write**: Client acquires NameNode block allocation + 3 DataNode targets $\to$ streams block in $64\text{ KB}$ packets down a **DataNode pipeline** (`Client → DN1 → DN2 → DN3`) with reverse ACK confirmation.
 
 #### IN DETAIL
-Notice the core HDFS insight: **"Move Computation, Not Data" + "Keep Metadata Small in RAM"**:
-- If you chopped a Petabyte warehouse into tiny 4 KB POSIX blocks, the NameNode's RAM would explode holding billions of metadata entries, and DataNodes would waste all day seeking!
-- Making blocks **128 MB** shrinks metadata $32,000\times$, and spreading 3 replicas across **2 racks** (1 here + 2 on another rack) guarantees you **never lose data even if an entire rack power switch burns out**, without paying triple cross-rack core bandwidth!
+The **Hadoop Distributed File System (HDFS)** breaks away from classic small-block POSIX semantics to sustain high-throughput streaming scans over commodity failure-prone clusters:
+- **RAM-Resident Master Metadata & Large Blocks ($64\text{--}128\text{ MB}$)**: Storing the entire namespace tree and block-to-DataNode location maps directly in NameNode DRAM eliminates disk seek bottlenecks during file resolution, while massive $128\text{ MB}$ blocks slash both NameNode RAM metadata footprint ($\sim 150\text{ B/block}$) and disk seek frequency during sequential multi-gigabyte streaming reads.
+- **Fault Masking & Write Pipeline**: DataNodes stream $3$-second heartbeats plus periodic block reports; lost nodes trigger automatic cross-rack re-replication. Write pipelines (`Client -> DN1 -> DN2 -> DN3`) stream packets sequentially across TCP chains matching **Rack Awareness** (1 local + 1 same-rack or cross-rack split + 1 remote-rack replica)—balancing cross-switch backbone bandwidth against full rack-power survival—while sacrificing arbitrary in-place random writes (**Append-Only / WORM**).
 
 ---
 
@@ -121,10 +121,9 @@ In HDFS, an auxiliary NameNode host can run in one of two protective roles (prev
    - Receives a live stream of journal transactions directly from the active NameNode, persists them locally, and applies them to its own RAM image—so if the active NameNode fails, the BackupNode already holds the latest namespace state ready for fast recovery.
 
 #### IN DETAIL
-Think of the NameNode like a busy bank cashier keeping a giant **Account Balance Ledger (`checkpoint / fsimage`)** plus a **Daily Receipt Roll (`journal / edits`)**:
-- If nobody ever folds the daily receipts back into the main ledger, after a month the receipt roll grows 10 miles long—so if the bank reboots after a power outage, it takes *hours* to re-read every receipt!
-- **CheckpointNode** periodically walks over, copies the ledger + receipt roll onto its own computer, tallies them into a clean brand-new ledger, and hands it back!
-- **BackupNode** sits right next to the cashier listening to *every transaction live as it happens*, keeping an **identical live copy in its own RAM**—acting like both a checkpointer AND an instant hot-standby mirror!
+Because HDFS stores active metadata changes purely as sequential appends to **`edits`**, leaving only the initial **`fsimage`** untouched causes journal bloat and slow NameNode restarts without periodic state compaction:
+- **CheckpointNode (Periodic Asynchronous Log Merging)**: Periodically pulls `fsimage` and `edits` over HTTP from the active NameNode, replays transactions locally into an updated unified snapshot `fsimage.ckpt`, and uploads it back to truncate the old `edits` log—keeping active NameNode startup recovery bounded without taxing the active NameNode CPU/RAM during merges *(note: runs strictly out-of-band without live failover state)*.
+- **BackupNode (Real-Time In-Memory Warm Standby)**: Maintains a complete live namespace state synchronized in its own RAM in real time alongside `fsimage`/`edits`, streaming every active NameNode mutation synchronously/in-step so it simultaneously performs local checkpointing *and* preserves an up-to-the-instant metadata mirror for rapid NameNode recovery.
 
 ---
 
@@ -150,9 +149,9 @@ Think of the NameNode like a busy bank cashier keeping a giant **Account Balance
    - **Master Failure**: Rare; recovers from periodic Master checkpoints or aborts.
 
 #### IN DETAIL
-Look closely at why a **completed Map** task gets re-run if its worker crashes, while a **completed Reduce** task does *not*:
-- Map outputs are temporary scratch notes stored only on that single worker's **local disk**—if the worker dies, its local disk dies with it!
-- Reduce outputs are committed directly into globally replicated **HDFS** (3 copies across racks!), so even if that Reduce worker bursts into flames 1 second after finishing, its output is already safe!
+**MapReduce** achieves linear petabyte-scale data processing across unreliable commodity nodes through **functional data-parallel purity**, **data locality**, and **disk-backed stage boundaries**:
+- **Deterministic Stage Pipeline & Shuffle**: `InputSplits` align cleanly to $128\text{ MB}$ HDFS blocks so the JobTracker schedules Map tasks directly onto nodes already holding local replicas (**"Move Computation, Not Data"**). Each Mapper emits `(k2, v2)` pairs partitioned (`hash(k2) mod R`) into $R$ local disk buffers (optionally compacted pre-network via **Combiners**), which Reducers pull via HTTP **Shuffle**, merge-sort by key, and collapse into final HDFS files.
+- **Asymmetric Task-Failure Recovery**: Mappers write intermediate partitions strictly to *local ephemeral disk*, so a crashed worker loses completed Map outputs—forcing the Master to re-execute those Map tasks elsewhere and update Reducers with the new partition URLs. Conversely, completed Reduce tasks commit directly into globally $3\times$-replicated **HDFS**, so crashed nodes lose zero finalized outputs and require zero Reduce re-runs.
 
 ---
 
@@ -170,9 +169,9 @@ MapReduce handles stragglers using **Speculative Execution (Backup Tasks)**:
 3. **First-to-Finish Wins**: Whichever execution (original or backup) finishes first reports completion to the Master, which commits its output and kills/ignores the slower duplicate—cutting total job latency dramatically (e.g., Google observed up to ~44% speedup in MapReduce benchmarks) using only a tiny fraction of extra cluster resources.
 
 #### IN DETAIL
-Imagine 100 runners in a team relay where the team's finish time equals the **last** runner crossing the line! 99 runners finish in 10 minutes, while Runner #47 trips on a bad shoelace (a flaky disk or noisy neighbor VM) and is limping at 1 mph—making the entire team wait an extra 30 minutes!
-
-Instead of waiting helplessly, the MapReduce Master uses **Backup Tasks (Speculative Execution)**: as soon as the job nears the finish line, it assigns a healthy idle runner to **run a duplicate copy of Task #47 in parallel**! Whichever finishes first wins and cancels the other—turning a 40-minute stall into an 11-minute finish!
+In synchronous barrier-coupled MapReduce stages, job latency is governed strictly by the slowest **tail task ($\max_i T_i$)** rather than mean worker speed (**Straggler / Tail-Latency Problem**):
+- **Root Causes of Stragglers**: Hardware heterogeneity, failing ECC DRAM or degrading disk sectors inducing silent DMA retries, OS background maintenance, network switch hotspot congestion, or **Key Skew** (hot Partition keys routing disproportionate records to one Reducer).
+- **Speculative Execution Trade-off**: Once progress monitors observe almost all tasks finished (`~99%`) with outlier trailing tasks lagging significantly behind peer mean progress rate, launching duplicate **backup tasks** on idle cluster nodes lets the first completed instance commit cleanly while killing the slower sibling—cutting overall job completion time substantially at tiny marginal cluster compute cost (unless skew itself drives slowness, where all duplicates experience identical key volume).
 
 ---
 
@@ -199,11 +198,9 @@ Instead of waiting helplessly, the MapReduce Master uses **Backup Tasks (Specula
    - **Software-Defined Networking (`SDN`)**: Decouples the programmable control plane from data-plane switches for instant multi-tenant cloud isolation.
 
 #### IN DETAIL
-Notice how the four system models form an evolutionary staircase toward Cloud Computing:
-- **Clusters** put identical servers in one room (**one owner**).
-- **Grids** hooked universities together across cities (**shared science across owners**).
-- **P2P** ditched servers completely so ordinary laptops shared files directly.
-- **Cloud Computing** combined massive Clusters + Hardware Virtualization (`IaaS/PaaS/SaaS`) + SDN + HDFS/MapReduce so anyone can rent 10,000 servers for an hour with a credit card!
+Hwang, Fox, and Dongarra classify distributed architectures along two orthogonal axes—**administrative homogeneity/ownership** and **hardware-virtualization elasticity**:
+- **Clusters vs. Grids vs. P2P**: **Clusters** couple homogeneous dedicated commodity nodes over fast local networks under single-organization control (`MPI`/MapReduce); **Grids** federate geographically dispersed, heterogeneous institutional clusters via security middleware (`Globus`) for loosely coupled coarse scientific workflows; **P2P Overlays** eliminate centralized coordination completely so untrusted self-organizing edge nodes (`Chord`, `BitTorrent`) share resources symmetrically despite high churn.
+- **Cloud Computing Integration (IaaS / PaaS / SaaS + Enablers)**: Cloud platforms synthesize cluster scale with multi-tenant **Hardware Virtualization** (rapid VM/container isolation), **Service-Oriented APIs**, and **Software-Defined Networking (SDN)** (centralized virtual overlay decoupling tenant L2/L3 topologies from physical data-center switches) to offer elastic utility provisioning priced per usage slice.
 
 ---
 
@@ -223,9 +220,9 @@ Notice how the four system models form an evolutionary staircase toward Cloud Co
 | **Scheduling & Execution Paradigm** | Short-term OS CPU scheduler **moves data from disk $\to$ RAM $\to$ CPU** on one machine; POSIX buffer cache exploits temporal reuse. | **Data Locality Scheduling** moves the *compute task* onto the DataNode already holding the block, avoiding saturating datacenter bisection bandwidth. |
 
 #### IN DETAIL
-This captures Saltzer & Kaashoek's famous lesson from `3.1`: **"Scaling changes the physics of the system."**
-- Inside one laptop, `4 KB` blocks + POSIX random updates + a shared RAM buffer cache work wonderfully because the disk bus is right next to the CPU!
-- Multiply that by 10,000 commodity machines (`HDFS + MapReduce`), and **every rule flips**: keeping 4 KB metadata in NameNode RAM explodes ($40\text{ GB}$ per TB!), moving data to compute chokes the cluster switch, random multi-writer locking kills throughput, and hardware failures become routine—requiring `128 MB` blocks, append-only files, rack-aware replication, and Data Locality scheduling!
+Contrasting classical local POSIX file systems (**`vsfs`**) against big-data distributed stacks (**`HDFS + MapReduce`**) exemplifies Saltzer and Kaashoek's principle that **order-of-magnitude scale shifts invalidate local engineering assumptions**:
+- **Block Size & Mutation Semantics**: Local `4 KB` blocks minimize internal fragmentation for small text/config files and support arbitrary in-place byte overwrites (`pwrite()`) coordinated via kernel page-cache locks; HDFS expands blocks **$32,768\times$ (`128 MB`)** to keep multi-petabyte metadata inside RAM and restricts files strictly to **Write-Once-Read-Many (WORM)** appends so $3\times$ cross-rack pipeline replication stays coherent without distributed byte-range locking protocols.
+- **Fault & Locality Model**: A local OS treats a dead disk as a catastrophic system failure (`kernel panic`/unmount), whereas HDFS treats continuous node/disk failures as normal background telemetry managed via heartbeats and MapReduce deterministic task re-execution—while **Data Locality** moves execution binaries directly to storage hosts rather than pulling petabytes across oversubscribed top-of-rack core switches.
 
 ---
 
@@ -247,10 +244,10 @@ This captures Saltzer & Kaashoek's famous lesson from `3.1`: **"Scaling changes 
    - Because the Guest's IP, virtual MAC, and **live TCP state (`seq`, `ack`, `cwnd`, sockets)** live inside migrated Guest RAM, existing TCP connections survive intact! Host B broadcasts an **unsolicited (gratuitous) ARP** so local **L2 Switches** update their backward-learning MAC tables to Host B's switch port instantaneously.
 
 #### IN DETAIL
-Every single major unit of AOS locks together inside **one 30-millisecond Live VM Migration**:
-1. **Hypervisor Rings (`Ch 18 / 3.6`)** decouple the guest from physical hardware.
-2. **Page-Table Dirty Bits (`Ch 9–10`)** track which RAM pages changed during live execution so Pre-Copy converges.
-3. **TCP Byte Streams (`Sec 2 Transport`)** stay alive cleanly because the VM's TCP sequence numbers and socket buffers travel inside migrated RAM.
-4. **L2 Learning Bridges/Switches + Gratuitous ARP (`Sec 2 MAC/Network`)** seamlessly re-point incoming Ethernet frames to the new physical server port before TCP's retransmission timer (`RTO`) even notices!
+Live Cloud VM Migration orchestrates concepts spanning **four distinct layers of OS & Networking architecture** into one uninterrupted transition:
+- **1. Privilege Virtualization (`Xen Rings / Intel VT-x`)**: Hypervisor traps and emulates or virtualizes sensitive guest OS state (`Ring 0` / VMX Root) completely transparently inside encapsulated software structures, making guest hardware registers and interrupts portable across physical CPUs.
+- **2. Virtual Memory Co-Design (`Dirty Bits + EPT + Demand Paging`)**: Iterative Pre-Copy enables write-protection traps inside **Shadow / Extended Page Tables (`EPT`)** (`dirty-page logging`) to copy active RAM over the LAN while guest apps keep executing, copying only freshly dirtied pages across converging rounds until **Stop-and-Copy** freezes the vCPU momentarily for millisecond final dirty sync *(aided by **Ballooning** reclaiming zeroed/idle pages before transfer)*.
+- **3. Transport & Data-Link Cutover (`TCP + Gratuitous ARP`)**: Active guest TCP connections preserve end-to-end 4-tuple socket state (`Seq/Ack/cwnd`) across the pause (`< 1 RTO`, triggering zero connection resets!), while the destination hypervisor emits an unsolicited **Gratuitous ARP** broadcast reprogramming Top-of-Rack Layer-2 switch MAC tables toward the target host's physical port immediately upon VM resumption.
 
 ---
+

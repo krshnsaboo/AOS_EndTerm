@@ -78,17 +78,9 @@
   - Enables running programs larger than any single contiguous hole (plus **virtual memory / demand paging**) and clean per-page protection/code sharing.
 
 #### IN DETAIL
-Notice how these 5 transitions literally tell the entire **evolutionary saga of Operating Systems**! Every single step fixed the exact crisis left by the step before it:
-1. **(e) Manual $\to$ Batch**: Humans were too slow swapping jobs $\implies$ Resident Monitor automated transitions!
-2. **(a) Single-user $\to$ Multiprogramming**: Slow disks left CPU idle $\implies$ keep multiple jobs in RAM so CPU never sits idle on I/O!
-3. **(b) Absolute $\to$ Relocatable**: Jobs stuck waiting for *one specific memory slot* while other slots were empty $\implies$ base/relocation registers let a job run anywhere!
-4. **(c) Fixed $\to$ Variable Partitions**: Putting a 10 KB job in a 100 KB fixed slot wasted 90 KB (**internal fragmentation**) $\implies$ cut partitions dynamically to fit each job!
-5. **(d) Contiguous $\to$ Non-contiguous**: Cutting dynamic sizes left Swiss-cheese gaps (**external fragmentation**) $\implies$ chop memory into fixed pages/frames!
-
-**Extra Memory Analogy (Contiguous $\to$ Non-Contiguous)**:
-Imagine parking 20-foot limousines along a curb with no splitting allowed (**contiguous allocation**). After several cars leave, you might have a 10-foot gap near the corner and another 12-foot gap down the block. You have **22 feet** of empty curb total, yet a 20-foot limousine still can't park unless you tow every other parked car down the street (**memory compaction**, which freezes the system!).
-
-Now switch to **paging (non-contiguous allocation)**: chop every car (process) into uniform 4 KB bike-sized slots (**pages**) and chop the curb into 4 KB slots (**frames**). Now you can park the pieces anywhere free frames exist! Zero external fragmentation, zero compaction needed, and as a bonus, you don't even have to keep parts in RAM that aren't currently being used!
+Each OS evolutionary stage emerged to eliminate the dominant hardware bottleneck created by the huge speed gap between electronic CPUs ($\mu$s–ns) and electromechanical peripherals (ms–s):
+- **Hardware Enablers**: Asynchronous DMA channels, programmable interval timers, hardware mode bits, and Memory Management Units (MMUs) decoupled CPU compute from slow I/O, prevented runaway loops from monopolizing the processor, and enabled non-contiguous virtual-to-physical memory translation.
+- **Optimization Metric Shift**: Early systems maximized raw hardware throughput (CPU utilization in batch/multiprogramming), whereas later systems balanced throughput with bounded interactive latency (time-sharing) and physical RAM overcommitment (paging/virtual memory).
 
 ---
 
@@ -111,18 +103,9 @@ Now switch to **paging (non-contiguous allocation)**: chop every car (process) i
 4. **New Problems Introduced by Interrupts ("Pandora's Box")**: Asynchronous interrupts made execution **nondeterministic and non-reproducible**, causing **race conditions, partial-state corruption, and synchronization bugs**—motivating interrupt-safe state saving and semaphores.
 
 #### IN DETAIL
-Imagine baking cookies without an oven timer (no interrupts). You have to walk over and peek into the oven window (**a probe instruction**):
-- If the cookies are done (`Yes`), you know for sure. If they aren't done (`No`), they could burn 2 seconds after you turn away!
-- If you peek every 5 seconds (**high frequency**), you never burn cookies, but you get no other cooking done (**slows down CPU**). If you peek every 10 minutes (**low frequency**), you work efficiently, but cookies sit burning after finishing (**poor reaction time**).
-- Even worse, imagine writing recipes where every step says *"peek at the oven"*: inside a 10-second stirring loop, you'd peek constantly, and you'd have to rewrite two copies of every recipe—one for "while baking" and one for "oven off"!
-
-Hardware **interrupts** finally cured all of these polling dilemmas—though as Dijkstra put it, they opened "Pandora's box" of nondeterminism!
-
-**From Polling to Interrupts' "Pandora's Box"**:
-In `EWD1303.pdf`, Dijkstra tells this story vividly:
-- Before interrupts, computers had to stop calculating every few steps to execute a **probe instruction** (*"Hey printer, done yet?"*). Even worse than wasting CPU time, Dijkstra points out an insidious bug: if the printer says *"No"*, it might finish 1 microsecond *after* the test—leading to subtle missed-event bugs!
-- Hardware **interrupts** rescued CPU speed: the processor never has to ask; the peripheral taps it on the shoulder the moment work completes.
-- **The catch**: Dijkstra actually panicked when hardware designers first proposed adding interrupts to the X1 machine in 1957! Why? Because suddenly a program wasn't deterministic anymore—an interrupt could hit between *any* two instructions, exposing half-updated variables and creating irreproducible bugs that plagued systems until semaphores and critical-section theory tamed them!
+In `EWD1303`, Dijkstra analyzed the structural transition caused by introducing asynchronous hardware interrupts into sequential computers:
+- **Polling (Probe Instructions)**: When the CPU periodically checks a peripheral's `READY` status register inside its own instruction stream, execution timing and control flow remain completely deterministic and reproducible—every input produces the identical instruction sequence.
+- **Hardware Interrupts & Nondeterminism**: Allowing peripherals to trigger arbitrary jumps into an ISR mid-execution means an asynchronous external signal can split any two sequential instructions. Two runs with identical binary inputs now diverge cleanly depending on microsecond hardware timing, exposing subtle time-dependent race conditions on shared state unless explicit mutual exclusion and interrupt synchronization primitives are introduced.
 
 ---
 
@@ -150,11 +133,9 @@ Without a **medium-term scheduler** (swapping), an operating system suffers from
 4. **Poor System Throughput & Response Time**: Overcommitted memory and skewed queues lower overall hardware utilization and stall interactive jobs.
 
 #### IN DETAIL
-Without a medium-term scheduler, once a process enters RAM via the long-term scheduler, **the ONLY way it ever leaves RAM is by terminating!**
-Think what goes wrong on a real system:
-- Ten idle browser tabs or suspended jobs hog 95% of RAM forever while active jobs starve and **thrash**!
-- Or 5 jobs all enter an intense CPU-crunching phase at once, leaving the disk completely idle, while an I/O job sits locked outside RAM!
-The medium-term scheduler solves both by temporarily **suspending and swapping out** selected processes to disk, then swapping them back in cleanly when RAM frees up or the mix needs rebalancing!
+Without a **Medium-Term Scheduler (Swapper)**, admission control becomes irreversible once a process enters physical memory:
+- **Dynamic Working-Set Oversubscription**: Even if the Long-Term Scheduler picks a sensible initial multiprogramming level $N$, processes dynamically allocate heap memory (`brk`/`mmap`), expanding their aggregate working-set footprint beyond available DRAM frames.
+- **System Failure Modes**: Without the ability to suspend active processes cleanly to backing swap storage (`Ready/Blocked -> Ready-Suspended/Blocked-Suspended`), page replacement degrades into global **thrashing**—CPU utilization collapses while disk paging saturates—and blocked long-idle processes permanently lock physical frames away from active workloads.
 
 ---
 
@@ -170,11 +151,9 @@ The medium-term scheduler solves both by temporarily **suspending and swapping o
 - **Justification**: I/O-bound processes execute very short CPU bursts before blocking for lengthy I/O operations. By assigning higher priority to I/O-bound processes, the OS dispatches them quickly so they can initiate I/O immediately and keep I/O devices busy, while CPU-bound processes utilize the remaining CPU time while I/O is in progress. This avoids the convoy effect and maximizes overall CPU utilization, I/O utilization, and interactive response time.
 
 #### IN DETAIL
-In general-purpose OSes (and explicitly in Prof. Krishna Reddy's scheduling lectures and UNIX), prioritizing I/O-bound jobs is a win-win:
-- Suppose Job A needs **1 ms CPU then 99 ms disk**, and Job B needs **100 ms CPU**.
-- If **A runs first**: at $t=1\text{ ms}$, A starts its disk operation, and from $t=1\text{ ms}$ to $t=100\text{ ms}$ **both the CPU (running B) and the disk (serving A) work in parallel at ~100% utilization!**
-- If **B ran first** (FCFS): the disk sits 100% idle for the first 100 ms, wasting hardware throughput and delaying A's response by 100×!
-*(And aging/priority decay ensures B never starves.)*
+Prioritizing **I/O-bound processes** over **CPU-bound processes** improves global hardware utilization across both processors and slow peripheral subsystems simultaneously:
+- **Short Critical Dispatch Requirement**: An I/O-bound process requires only a brief CPU burst (typically microseconds to a few milliseconds) to parse a read buffer and enqueue its next multi-millisecond DMA request. Giving it preemptive priority lets the OS keep disk arms, SSD channels, and NICs continuously saturated.
+- **Minimal Penalty to CPU-Bound Jobs**: Because I/O-bound jobs block swiftly, they consume negligible total CPU percentage before relinquishing the processor back to waiting CPU-bound threads—maximizing overlap between electronic computation and slow I/O transfers simultaneously.
 
 ---
 
@@ -202,13 +181,9 @@ In general-purpose OSes (and explicitly in Prof. Krishna Reddy's scheduling lect
     - Also, a process whose quantum resets/doesn't reset properly after blocking can make waiting times unpredictable.
 
 #### IN DETAIL
-Look at why ordinary Round Robin frustrates batch jobs: a batch job needing 10 seconds with a 50 ms quantum gets interrupted **200 times**, wasting time on 200 context switches and cold caches.
-**Progressive Round Robin** tries to be clever: *"Start small (50 ms) so short interactive jobs finish fast; if you're still running on lap 2, lap 3, lap 4, we know you're a long batch job, so we'll give you 100 ms, 150 ms, 200 ms so you stop wasting context-switch overhead!"*
-
-Sounds great—until you spot the fatal flaw:
-- Suppose Batch Job A has been running for 20 rounds. Its personal quantum is now **$1000\text{ ms}$ (1 full second)**!
-- Right now, a user hits a key in an interactive editor. Even though the interactive job only needs 2 ms, it has to sit and wait until Batch Job A finishes its huge 1-second time slice (plus any other long batch jobs ahead of it!).
-- In other words, **giving older jobs huge quanta destroys the worst-case response-time guarantee of ordinary Round Robin ($q \times (N-1)$)** and brings back the **Convoy Effect**! (That's why real systems like MLFQ keep interactive jobs in *high-priority* short-quantum queues and drop batch jobs to *lower-priority* long-quantum queues, where incoming interactive jobs immediately *preempt* the batch job!)
+**Progressive Round Robin** reconciles interactive latency and batch throughput by coupling each process's time quantum to its accumulated execution duration within a single scheduler framework:
+- **Dynamic Per-Process Slicing ($50, 100, 150\dots\text{ ms}$)**: Newly arrived or freshly unblocked interactive tasks start at small initial quanta ($50\text{ ms}$), delivering fast initial response latency without starving peers.
+- **Amortized Batch Overhead**: Long CPU-bound batch jobs remain runnable through consecutive turns; doubling or incrementing their quantum geometrically reduces total context switches from $O(T_{\text{job}} / q)$ to $O(\log(T_{\text{job}}))$ or $O(\sqrt{T_{\text{job}}})$, substantially improving cache locality and raw CPU efficiency relative to fixed small-quantum Round Robin.
 
 ---
 
@@ -225,9 +200,9 @@ Sounds great—until you spot the fatal flaw:
 - **Justification**: A standard blocking semaphore places waiting processes onto an OS sleep queue (`wait()`/`signal()`), consuming no CPU cycles while blocked—the same underlying sleep/wakeup mechanism used by monitor condition variables. Monitors add language-level mutual exclusion and safer structure, not a different hardware sleep mechanism.
 
 #### IN DETAIL
-Be aware of this classic course nuance!
-- In **OSN Endsem 2022**, the key evaluated **blocking OS semaphores** vs. **monitors**: since kernel semaphores already sleep without spinning, monitors have the same blocking behavior (**FALSE**).
-- In **AOS Endsem 2025 Q1.2/Q1.4**, the comparison emphasized how monitors stop developers from writing ad-hoc user-level polling/spin-loops around low-level semaphores (**TRUE**). Mentioning that *kernel-level semaphores already block via wait queues, whereas monitors reduce application-level polling bugs* covers both angles clearly!
+Evaluating whether monitors reduce **busy waiting** relative to semaphores requires distinguishing **kernel primitive semantics** from **application usage errors**:
+- **OS Kernel Level (`FALSE` per OSN 2022 key)**: Both kernel blocking semaphores (`P`/`V`) and monitors suspend blocked threads inside OS kernel wait queues (`Blocked` state) without spinning on CPU flags—neither relies on busy waiting inside the primitive itself.
+- **Software Engineering Level (`TRUE` per AOS 2025 key)**: Because semaphores decouple locking and condition state manually, programmers frequently wrap multi-variable invariants in error-prone user-space spin loops or polling retries (`unlock; sleep; lock; recheck`), whereas monitors natively package atomic condition queues (`c.wait` / `c.signal`), eliminating ad-hoc user polling entirely.
 
 ---
 
@@ -357,18 +332,9 @@ void Southbound_Vehicle() {
 ```
 
 #### IN DETAIL
-Let's trace all three rules carefully to verify why this works and has zero bugs:
-- **Rule (a) — One direction at a time**:
-  - A Northbound car enters directly ONLY if `cur_dir == 0` (empty) OR `cur_dir == 1` (currently Northbound AND `wait_south == 0`). When the last car leaves (`on_bridge == 0`), we only switch `cur_dir` to South if the bridge is completely empty! So North and South cars can **never** be on the bridge together.
-- **Rule (b) — Strict alternation when both ends are waiting**:
-  - Suppose 3 Northbound cars are crossing because `wait_south` was 0. Then a Southbound car arrives (`wait_south = 1`) and blocks on `ok_south`. Any *new* Northbound car arriving now sees `wait_south > 0` and must wait in `wait_north` instead of jumping onto the bridge (preventing South starvation!).
-  - As soon as the currently crossing Northbound batch finishes (`on_bridge == 0`), the exit code checks `if (wait_south > 0)` first! It wakes **exactly one** Southbound car (`on_bridge = 1`). When that Southbound car finishes, its exit code checks `if (wait_north > 0)` first and wakes **exactly one** Northbound car! Thus North and South strictly alternate 1-by-1 while both queues are non-empty!
-- **Rule (c) — Continuous flow when the other side is empty**:
-  - If `wait_south == 0`, any number of Northbound cars enter immediately (`cur_dir == 1 && wait_south == 0`) or are woken together when the bridge drains (`while (wait_north > 0)`).
-- **Deadlock & Starvation Free**: Only one mutex is held briefly around counter updates (never held during `wait(ok_*)` or `Cross_Bridge()`), so deadlock is impossible, and alternation guarantees zero starvation.
-
-**Exam Note (Semaphores vs. Monitor)**:
-- Check the prompt carefully! These three exams explicitly asked for **Semaphores**, whereas **OSN 2022 Midsem Q7** (see [Monitor Solution right below](./Topic_04_Synchronization_Monitors_and_Classic_Problems.md#10-single-lane-bridge-synchronization-using-a-monitor-mesa-semantics-frequency-1)) asked for a **Monitor** implementation!
+Solving bidirectional **Single-Lane Bridge synchronization via binary semaphores** enforces three concurrent invariants cleanly without busy waiting or spin-retries:
+- **Single-Direction Mutual Exclusion (`cur_dir` + `on_bridge`)**: Simultaneous crossings occur only when `cur_dir` matches arriving traffic and zero opposite-direction vehicles are waiting (`wait_south == 0` / `wait_north == 0`). State transitions happen strictly inside short `mutex`-protected sections, never holding `mutex` across `Cross_Bridge()` or blocking calls.
+- **Turn-Yielding Batched Alternation**: When opposite traffic arrives mid-stream (`wait_south > 0`), newly arriving same-direction vehicles block instead of joining the bridge, preventing infinite starvation of the opposite queue. When the final crossing vehicle exits (`on_bridge == 0`), prioritizing the opposite wait queue (`if wait_south > 0`) transfers control deterministically between queues (`handoff` wakeup).
 
 ---
 
@@ -387,13 +353,9 @@ Let's trace all three rules carefully to verify why this works and has zero bugs
 | **System Throughput** | **Lower**: Imposes rigid ordering constraints—processes must acquire resources in fixed order even if they don't need an earlier resource yet (holding locks longer) or reject/restart out-of-order requests, reducing concurrency and throughput. | **Higher (under safe contention)**: No processes are aborted or artificially forced to hold unused early locks just for numbering; resources are dynamically granted whenever a safe sequence exists, maintaining higher concurrency and throughput. |
 
 #### IN DETAIL
-Think of these two approaches like managing intersections:
-1. **Preventing Circular Wait (Static Rules)**: Like a rule saying *"You MUST visit Shop 1 before Shop 2 before Shop 3."*
-   - **Overhead**: Almost zero! The traffic cop doesn't need to calculate anything—just check that your next shop ID is bigger than your current shop ID.
-   - **Throughput**: Poor! Even if Shop 3 is completely empty right now and you won't need Shop 1 for an hour, you're forced to grab Shop 1 early and hold it, blocking others and lowering overall throughput!
-2. **Banker's Algorithm (Dynamic Safety Check)**: Like an air-traffic controller checking the entire radar before clearing every takeoff.
-   - **Overhead**: Expensive! Every time *any* process asks for *any* resource, the OS simulates finishing all $n$ processes across $m$ resource types ($O(m \cdot n^2)$ work).
-   - **Throughput**: Much higher concurrency—as long as there's at least one guaranteed way for everyone to finish ("safe state"), requests are granted flexibly without artificial ordering restrictions!
+Comparing **Deadlock Prevention (eliminating Circular Wait)** against **Deadlock Avoidance (Banker's Algorithm)** contrasts **static structural invariants** against **dynamic future-state reachability verification**:
+- **Prevention (Total Resource Ordering)**: Zero runtime CPU computation per request (`Wait(r)` checks no safety table); works even without a priori maximum resource declarations. Its cost is architectural inflexibility (developers must fix lock acquisition order across all modules) and potential idle waiting when a process must lock a low-numbered resource early solely to satisfy rank order.
+- **Avoidance (Banker's Algorithm)**: Permits arbitrary dynamic acquisition order while guaranteeing zero deadlock, *provided* every process declares exact `Max[i][j]` bounds upfront and $O(m \cdot n^2)$ safety graph checks verify that a complete finishing sequence remains reachable after every grant—incurring heavy per-request locking/CPU overhead and false rejections whenever unsafe states merely *risk* deadlock without making it certain.
 
 ---
 
@@ -409,9 +371,9 @@ Think of these two approaches like managing intersections:
 - **Justification**: Global frame allocation allows a process whose working set is actively growing to claim free or infrequently used frames from other processes rather than thrashing inside a rigid fixed partition. By dynamically adjusting each process's frame count to match its current locality needs, global allocation reduces total page faults, improves memory utilization, and yields higher overall system throughput than local allocation.
 
 #### IN DETAIL
-Imagine two cooks sharing a 10-burner stove:
-- **Local allocation** draws a permanent tape line down the middle: *"Cook A gets 5 burners forever, Cook B gets 5 burners forever."* Even if Cook B is just simmering 1 small pot and has 4 burners idle while Cook A desperately needs 7 burners, Cook A isn't allowed to touch Cook B's 4 empty burners!
-- **Global allocation** lets Cook A borrow idle burners dynamically whenever Cook A's workload spikes—keeping total kitchen productivity (**system throughput**) higher! *(Catch: one greedy runaway process can steal too many frames from a neighbor unless minimum frame limits / working-set controls are maintained.)*
+**Global vs. Local Page Replacement Allocation** trades strict inter-process **performance isolation** against dynamic **aggregate memory efficiency**:
+- **Why Global Allocation Achieves Higher Throughput**: Application working sets expand and contract dynamically across execution phases (compile parsing vs. linking, heap bursts vs. idle waits). Global replacement pools free and least-recently-used frames across the entire system, dynamically shifting unused frames from quiescent processes to temporarily memory-hungry active processes—dramatically cutting total page-fault rates and raising aggregate CPU throughput.
+- **Inherent Stability Trade-off**: Because one aggressively faulting workload can steal frames belonging to well-behaved neighbors, local or minimum-guaranteed working-set floors (like Linux cgroup `memory.min` / per-process WS caps) are paired in multi-tenant environments to bound noisy-neighbor thrashing.
 
 ---
 
@@ -440,14 +402,9 @@ Imagine two cooks sharing a 10-burner stove:
   $$= 18 + 6 + 480,004 = \mathbf{480,028\text{ nanoseconds}}$$
 
 #### IN DETAIL
-Follow the exact phrasing of the problem: *"and then the reference is started again"*!
-1. You look in the cache first (**20 ns**).
-2. If it's in RAM (6% chance), you spend **60 ns** loading the word into cache, and **restart the reference (+20 ns)** = **100 ns** total.
-3. If it's on Disk (4% chance), you spend **12,000,000 ns** fetching from disk, **60 ns** copying into cache, and **restart the reference (+20 ns)** = **12,000,100 ns** total.
-Multiplying out: $18 + 6 + 480,004 = \mathbf{480,028\text{ ns}}$! Notice how 99.995% of the average access time comes purely from that 4% disk fault rate!
-
-**Note on 2022 Key Correction**:
-- The scanned 2022 key mistakenly reported `4.8 ms` (`4,800,000 ns`, off by a factor of $10\times$!). Computing carefully gives $0.9(20) + 0.06(100) + 0.04(12,000,100) = 18 + 6 + 480,004 = \mathbf{480,028\text{ ns}}$.
+Multi-tier memory latency evaluation (**Cache $\to$ Main Memory $\to$ Swap Disk**) illustrates how tiny **page-fault probabilities ($p$)** dominate **Effective Access Time (EAT)** due to a $10^5\times$–$10^6\times$ mechanical speed gap:
+- **Restart-Semantics Model**: When a memory reference misses both SRAM cache ($20\text{ ns}$, rate $1-H_c = 0.1$) and RAM (page fault, rate $p = 1 - H_m = 0.04$), the hardware first burns the initial lookup + OS swap latency ($12\text{ ms}$) to page the missing block into DRAM, and then **restarts the memory cycle cleanly**, paying a fresh cache miss ($20\text{ ns}$) plus RAM-to-cache refill ($120\text{ ns}$) before serving the datum.
+- **Scale Sensitivity**: Even at $96\%$ RAM residency, $0.04 \times 12,000,000\text{ ns} = 480,000\text{ ns}$ crushes the $28\text{ ns}$ cache/RAM terms completely—explaining why real demand-paged systems must maintain page-fault frequencies below $p < 10^{-5}$ to avoid crippling slowdowns.
 
 ---
 
@@ -481,11 +438,9 @@ Given link costs $c(C, B) = 6$, $c(C, D) = 3$, $c(C, E) = 5$:
   - **Outgoing Lines / Next Hops**: `(B, B, -, D, E, B)`
 
 #### IN DETAIL
-Watch how simple and mechanical Distance Vector Routing is!
-Router $C$ doesn't know the whole map—it only knows the cost to step onto its three neighbor bridges ($B=6$, $D=3$, $E=5$). When $B$, $D$, and $E$ mail in their distance vectors (each a 6-tuple for `A, B, C, D, E, F`), $C$ simply adds $6$ to every number from $B$, $3$ to every number from $D$, and $5$ to every number from $E$, then picks the smallest total column-by-column (always keeping $C \to C = 0$)!
-
-**Scan Trivia (2022 Endsem Q11 Check)**:
-- In `OSN_end_2022_M_key.pdf`, the printed solution key had a minor typo `6+1=18` on D's entry via B (correct is `6+1=7`), which fortunately did not alter the final routing table `(11, 6, 0, 3, 5, 8)` via `(B, B, -, D, E, B)` because direct `C→D = 3 < 7`!
+**Distance Vector Routing** implements **distributed asynchronous Bellman–Ford relaxation** purely from local link costs and neighbor-advertised cost vectors:
+- **Bellman–Ford Transition Equation**: Each router $x$ stores solely direct edge costs $c(x, v)$ to immediate neighbors $v \in N(x)$ plus the latest distance vectors $\mathbf{D}_v = [D_v(y)]_{y \in V}$ advertised by each neighbor. Recomputing $x$'s new distance table is completely mechanical: $D_x(y) = \min_{v \in N(x)} \{ c(x, v) + D_v(y) \}$, setting the corresponding minimum-cost neighbor $v^*$ as forwarding `Next Hop` (and keeping self-distance $D_x(x) = 0$).
+- **Convergence Mechanics**: Without global graph visibility, good cost reductions propagate at 1 hop per periodic exchange round, whereas arbitrary topology partitioning relies on loop-avoidance safeguards because old indirect neighbor paths retain stale finite hop estimates.
 
 ---
 
@@ -516,15 +471,9 @@ Router $C$ doesn't know the whole map—it only knows the cost to step onto its 
 - **Solution**: **Independent Half-Close (`FIN` + `ACK` in each direction) + Retransmission Timers + `TIME_WAIT` ($2\text{MSL}$)** so delayed segments drain and a lost final `ACK` can be re-sent safely.
 
 #### IN DETAIL
-Imagine a malicious or slow postal system where letters can get stuck in a mailbag for **2 minutes** and show up late!
-- **Why 2 steps (`Connect` $\to$ `Accepted`) fails catastrophically**: Suppose Alice ordered a pizza (`Connect` + `Charge $50`) an hour ago, got her pizza, and hung up. A delayed duplicate of that envelope shows up at the pizza shop now! In a 2-way handshake, the shop thinks it's a brand-new order, bakes a phantom pizza, and charges Alice $50 again!
-- **How the 3-Way Handshake fixes it**: Now, when an envelope `"Connect (ID = x)"` arrives, the shop does NOT bake the pizza yet! Instead, the shop replies: *"Did you really just ask for ID=x? Prove you're alive right now by echoing back my secret fresh number y!"*
-  - If it was a **ghost delayed packet**, Alice says *"Huh? I didn't order anything!"* (sends `RST` or ignores it)—so the shop safely drops the ghost request!
-  - Only a **live, real Alice** replies *"Yes, confirmed y!"* (Step 3), proving both sides are alive *right now* and synchronized on both directions' sequence numbers!
-
-**And Closing Safely (`Two-Army Problem`)**:
-(Two-Army Problem)**: Imagine two Blue armies trying to agree via messengers through enemy territory when to both hang up! Army 1 sends *"Let's hang up!"* Army 2 replies *"Agreed!"*—wait, how does Army 2 know Army 1 heard *"Agreed"*?! If Army 1 sends *"I heard your agreement!"*, how does Army 1 know *that* arrived? **Mathematically unsolvable with 100% perfection!**
-  So TCP compromises brilliantly: **close each direction separately (`FIN` / `ACK`)**, retry with a **timeout** if a `FIN` is lost (closing forcefully after $N$ retries), and wait **`2 * MSL` (`TIME_WAIT`)** so any stray packets die off cleanly!
+TCP connection lifecycle design resolves two fundamental distributed-systems pitfalls across unreliable networks: **delayed duplicate replays (`Establishment`)** and the **Two-Army asymmetric halting impossibility (`Release`)**:
+- **Three-Way Handshake & Delayed Duplicates**: Under naive two-way handshakes (`SYN -> ACK`), an obsolete delayed duplicate `SYN` arriving late opens a half-open ghost connection allocating server resources. With a **3-Way Handshake**, the server's `SYN(N_s) + ACK(N_c + 1)` forces client confirmation of `N_s + 1`; if the `SYN` was a ghost duplicate, the genuine client rejects the unrecognized `N_s + 1` with **`RST`** immediately, closing the ghost state cleanly.
+- **Connection Release (`4-Way FIN` + `2 MSL TIME_WAIT`)**: Proving bidirectional agreement via finite unreliable messages hits the unsolvable **Two-Army Problem** (any final `ACK` could drop leaving the sender unsure whether its peer heard it, requiring infinite ACKs of ACKs). TCP settles pragmatically using four independent half-closes (`FIN`/`ACK` per direction) paired with a **`2 × MSL` (`TIME_WAIT`)** hold state on the active closer—retransmitting lost final ACKs if duplicate `FIN`s re-arrive while allowing stale network segments to drain completely before port reuse.
 
 ---
 
@@ -548,10 +497,9 @@ Imagine a malicious or slow postal system where letters can get stuck in a mailb
 - **Kernel Design Benefits**: Keeps core mechanisms small, clean, and stable while policies adapt dynamically across deployments without kernel recompilation.
 
 #### IN DETAIL
-Think of a car's **cruise control / gas pedal** vs. **speed limits**:
-- **Mechanism** (*how*): The brake pedal, throttle, and engine speed controller. Car engineers build that once and never redesign it for different roads.
-- **Policy** (*what*): *"Drive 40 km/h in school zones, 100 km/h on highways."*
-If you hardcoded "40 km/h" physically into the car's engine gears (no separation of mechanism and policy!), you'd have to rebuild your engine every time you drove onto a highway! Similarly, an OS provides clean mechanisms (timers, priority queues, access-control checks) while letting admins/apps tune policies dynamically.
+Separating **mechanism** (low-level capability implementation) from **policy** (high-level decision strategy) is a core principle of microkernel and extensible OS architecture:
+- **Stability vs. Evolution**: Hardware timers, context-switch assembly stubs, page-table bit manipulation, and preemption primitives remain invariant across years, whereas optimal scheduling policies (batch throughput vs. interactive responsiveness vs. hard real-time) vary per workload and deployment.
+- **Cost of Conflation**: Hardcoding policy directly inside low-level mechanisms forces invasive kernel rewrites or OS recompilation whenever resource priorities change, sacrificing modularity and preventing application- or administrator-driven specialization (e.g., `nice` values, cgroups, or custom memory-reclaim policies).
 
 ---
 
@@ -572,9 +520,9 @@ If you hardcoded "40 km/h" physically into the car's engine gears (no separation
 - **Summary of How It Helped Evolution**: Enforced bottom-up verification, hardware isolation in lower layers, and clear modular boundaries over unstructured spaghetti monoliths.
 
 #### IN DETAIL
-Think of **layering** like an assembly line with strict one-way escalators:
-- **Why engineers love it**: Building and debugging is much easier when Floor 2 only relies on Floor 0 and Floor 1. Once Floor 1 passes all tests, any crash on Floor 2 can't come from Floor 3—cutting debugging complexity massively (like Dijkstra's THE system!).
-- **Why pure layered OSes fell out of favor in production**: Real OSes aren't neat one-way ladders! For instance, the **Memory Manager** needs the **Disk Driver** to swap pages, while the **Disk Driver** wants **Memory Buffers**! Plus, crossing 5 layers for every single disk read adds function-call overhead—so modern OSes (like Linux/Windows) keep modular boundaries *without* forcing every single call through 10 rigid layers!
+Strict **layered OS organization** arranges system components into a strict linear hierarchy $L_0, L_1, \dots, L_n$ where layer $L_i$ may invoke services **only** from layer $L_{i-1}$:
+- **Architectural Benefit**: Enforces acyclic dependency graphs and strict information hiding. Each layer relies exclusively on abstractions verified beneath it, allowing bottom-up incremental testing without circular dependencies (e.g., virtual memory cannot invoke file I/O if file buffers reside inside virtual memory).
+- **Performance & Design Limitations**: Strict linear ordering is notoriously difficult to partition cleanly without mutual dependencies (for instance, file systems use backing virtual memory while virtual-memory paging writes to a swap file), and every cross-layer request pays multiple function-call, parameter-marshaling, and sanity-check traversals through intermediate layers.
 
 ---
 
@@ -603,11 +551,9 @@ Think of **layering** like an assembly line with strict one-way escalators:
   - **Deadlock & Debugging Nightmare**: A page fault inside the scheduler or an interrupt inside memory routines could cause un-debuggable race conditions and circular waits, destroying modularity and formal correctness proofs.
 
 #### IN DETAIL
-Think about why putting **CPU Scheduling** *below* **Memory Management** in Dijkstra's THE system was so clever:
-- The Memory Manager needs to wait when it asks the secondary drum to load a missing memory page. Because CPU Scheduling + Semaphores are *already built underneath it*, the Memory Manager can simply sleep on a semaphore while the CPU runs another ready process!
-- Meanwhile, the CPU Scheduler itself doesn't need to know *anything* about virtual pages or drum tracks—it just switches between processes in core memory!
-
-If both were mashed into a **single level**, you'd have circular dependencies everywhere: memory code would have to manually manipulate interrupt flags and CPU registers while scheduling code would have to worry about whether its own tables were paged out to disk. Testing would become nearly impossible—which is exactly why Dijkstra separated them into strict layers!
+Dijkstra's **THE multiprogramming system** demonstrated how strict bottom-up ordering eliminates bootstrapping circularities across core OS abstractions:
+- **Why CPU Scheduling Sits Beneath Memory Management**: Implementing virtual memory segmentation/paging and page-fault handlers requires synchronization primitives (semaphores) and process suspension/resumption when backing-store I/O stalls. By placing the processor dispatcher and semaphore abstraction at the bottom (Level 0), higher layers (Level 1 Memory Management, Level 2 Operator Console, Level 3 I/O Buffering) can freely block and synchronize as sequential processes.
+- **Consequence of Merging Levels**: Collapsing Level 0 and Level 1 breaks strict layering—memory-allocation routines could no longer block via OS process primitives safely without risking re-entrant deadlocks on the scheduler itself, forcing brittle ad-hoc busy waiting inside low-level kernel code.
 
 ---
 
@@ -635,9 +581,9 @@ Taking **Create/Destroy** and **Read/Write** (or **Open/Close**) across Level 11
    - **Level 11 (External Devices)**: Initializes physical device hardware, claims exclusive access if needed (e.g., printer), and enables device interrupts (`close` releases peripheral).
 
 #### IN DETAIL
-Notice how both layers look identical from the outside—they both have `create, destroy, open, close, read, write`! That's **polymorphism / abstraction** in OS design. Under the hood, however, they do completely different jobs:
-- **At Level 10 (File System)**, you're managing **persistent stored objects** on a disk. `Create` makes a brand new empty file and gives it an inode; `write` saves bytes into disk blocks so you can read them next week.
-- **At Level 11 (External Devices)**, you're talking to **live physical hardware** like a keyboard or printer. You can't "create" a physical laser printer out of thin air—`create` just sets up a software handle/channel/window for it, and `read` on a keyboard blocks until a human actually presses a key!
+Comparing identical operation names (`create`, `open`, `read`, `write`, `destroy`) across two distinct OS layers illustrates **polymorphic abstraction across hardware and logical namespaces**:
+- **Level 11 (Device Driver / Physical Controller Layer)**: Operations operate directly on fixed hardware capabilities and controller registers—`create`/`destroy` are largely inapplicable or refer to transient device channel allocations, while `read`/`write` transmit raw physical sector/byte commands over MMIO or DMA.
+- **Level 10 (Logical File System Layer)**: Operations manipulate persistent metadata constructs—allocating inodes, updating free-space bitmaps, appending directory entries, checking ACL permissions, translating logical byte offsets via extent/pointer trees into LBA block numbers, and maintaining page-cache consistency.
 
 ---
 
@@ -660,10 +606,10 @@ Notice how both layers look identical from the outside—they both have `create,
   - **High CPU Utilization & Resilience to Blocking (Optimal)**: If one kernel thread blocks on I/O, another runnable kernel thread is immediately scheduled onto that freed CPU core, keeping all $P$ processors saturated while multiple user threads efficiently multiplex over the $K$ kernel threads without excessive kernel-thread overhead.
 
 #### IN DETAIL
-Think of **processors ($P=4$)** as 4 factory machines, **kernel threads ($K$)** as licensed machine operators, and **user threads ($U=20$)** as tasks to perform:
-- **(i) $K = 2 < 4$**: Only 2 operators exist, so 2 machines gather dust permanently!
-- **(ii) $K = 4 = 4$**: All 4 machines stay busy *until* one operator steps away to wait on a delivery truck (**blocking syscall**)—leaving Machine #4 sitting empty while 16 tasks wait in line!
-- **(iii) $K = 8$ ($4 < 8 < 20$)**: You have 8 operators for 4 machines! Whenever one operator waits on a delivery truck, one of the spare operators immediately steps onto Machine #4—keeping all 4 machines humming near **100% utilization**, without paying the memory cost of hiring 20 separate kernel-level operators!
+Under the **Many-to-Many (`M:N`)** threading architecture, execution concurrency spans two decoupled scheduling layers: user-space threads ($U$) multiplexed by a runtime library onto Kernel-Schedulable Entities / LWPs ($K$), which the OS schedules onto physical processors ($P$):
+- **$K < P$ (Kernel-Thread Bottleneck)**: The OS kernel perceives only $K$ dispatchable execution contexts, leaving at least $P - K$ CPU cores idle regardless of how many $U$ user threads are runnable.
+- **$K = P$ (Saturated Optimal Mapping for Pure Compute)**: Every core can execute one thread concurrently without excess kernel context switches, provided none of the $K$ LWPs block in synchronous syscalls.
+- **$P < K < U$ (Resilience to Blocking Syscalls)**: Having surplus kernel threads ($K > P$) guarantees that if one or more LWPs block inside kernel I/O, the OS seamlessly schedules alternate ready LWPs onto freed cores, maintaining full $P$-way core utilization at modest extra kernel TCB overhead.
 
 ---
 
@@ -679,12 +625,9 @@ A **thread pool** pre-creates a bounded number of worker threads at startup that
 3. **Predictable Performance & Graceful Degradation**: When all pool threads are busy, new requests wait cleanly in a task queue rather than crashing the system by spawning thousands of threads.
 
 #### IN DETAIL
-Imagine a busy restaurant hiring and firing a brand-new waiter every single time a customer walks in, then firing them 30 seconds later when the bill is paid! That's what spawning a new thread per request does—it wastes huge OS overhead allocating stacks and kernel structures, and during a rush hour (10,000 simultaneous requests), the restaurant runs out of space and collapses.
-
-A **thread pool** hires a fixed team of, say, 20 waiters at opening time:
-- When requests arrive, an idle thread picks up the job immediately (zero startup delay).
-- When done, the thread returns to the pool rather than dying.
-- If 500 requests arrive at once, 20 run smoothly and 480 wait politely in the request queue without crashing RAM!
+Thread pools amortize thread lifecycle costs and enforce bounded concurrency over dynamic bursty workloads:
+- **Kernel Lifecycle Amortization**: Spawning and tearing down native OS threads repeatedly per short request incurs repeated `clone()` syscalls, stack `mmap()` allocation, page-table initialization, kernel TCB setup, and scheduler enqueueing—often exceeding the compute duration of short tasks themselves. Pre-allocated worker threads reuse persistent stacks and TCBs continuously across tasks from a shared synchronization queue.
+- **Resource Exhaustion Protection**: Unbounded thread-per-request architectures under heavy traffic surges exhaust virtual/physical stack memory (`OOM`) and trigger severe scheduler context-switch thrashing; a bounded pool caps active execution contexts cleanly at an optimal core-tuned concurrency limit.
 
 ---
 
@@ -708,10 +651,9 @@ A **thread pool** hires a fixed team of, say, 20 waiters at opening time:
    - Furthermore, **priority decay / aging** reduces recorded recent CPU usage as a process waits, periodically boosting waiting CPU-bound processes so they never starve.
 
 #### IN DETAIL
-This is actually the exact mechanism used in **classic UNIX scheduling** (and MLFQ with aging)!
-Think of priority like "how tired/full you are from eating CPU time recently":
-- An **I/O-bound process** runs for just 1 ms, then leaves for 50 ms to wait for disk or keyboard input. When it comes back, it has consumed almost *zero* CPU recently, so the scheduler lets it jump right to the front, do its tiny 1 ms burst, and get back to I/O—keeping disks and users happy!
-- Meanwhile, a **CPU-bound process** eats 100% of the CPU when it gets a turn, so its "recent CPU usage" shoots up and its priority drops. Does it starve forever? **No!** First, whenever the I/O jobs are waiting on the disk, the CPU-bound job gets all the remaining CPU cycles. Second, every second that passes, the kernel decays everyone's "recent CPU" counter (aging), so a neglected CPU-bound job naturally becomes "fresh" again and gets scheduled!
+Dynamic priority decay based on **recent CPU consumption** (exemplified by classic UNIX `decay` scheduling) adapts automatically without requiring prior workload labels:
+- **Negative-Feedback Mechanism**: Every timer tick, the OS increments a running process's recent-CPU counter (`p_cpu`) and periodically decays all counters exponentially (e.g., $\text{p\_cpu} \leftarrow \text{p\_cpu} / 2$), setting scheduling priority inversely proportional to `p_cpu`.
+- **Automatic Convergence**: I/O-bound processes run briefly ($< 1\text{ ms}$) before blocking for disk/network completion, keeping their `p_cpu` tiny and yielding top scheduling priority the instant their I/O returns. CPU-bound processes exhaust full timer quanta, accumulating large `p_cpu` values and automatically drifting to lower priority queues where they soak up idle background cycles without starving I/O devices.
 
 ---
 
@@ -735,10 +677,9 @@ If the OS **misclassifies** processes—assigning **high priority to CPU-bound**
 - Correctly giving higher priority to I/O-bound processes maximizes CPU–I/O overlap and keeps CPU-bound jobs running whenever I/O-bound processes block (no starvation via aging/recent-usage decay).
 
 #### IN DETAIL
-Look at what happens when you flip priorities upside down (putting 10-hour heavy math jobs ahead of 1-ms keyboard/disk jobs):
-- **I/O devices sit starving**: Disks and network cards sit completely empty doing **zero work** while the CPU crunches a long math loop—because the tiny 1 ms I/O-bound jobs that feed work to those disks aren't allowed onto the CPU!
-- **Users freeze**: Interactive terminals lag for seconds waiting behind batch math jobs!
-- Thus, wrong classification destroys *both* **interactive responsiveness** AND **overall multi-device system throughput**!
+Inverting scheduling preference to prioritize **CPU-bound processes** above **I/O-bound processes** reverses hardware pipelining and triggers systemic underutilization:
+- **Device Starvation & Convoy Effect**: Short I/O-bound processes stall indefinitely in the Ready Queue waiting behind multi-second CPU computations. Meanwhile, disk and network subsystems fall completely idle because their initiating processes cannot obtain the tiny CPU slices needed to dispatch subsequent I/O commands.
+- **Interactive Latency Collapse**: Interactive user threads (keyboard, GUI, RPC handlers) are fundamentally I/O-bound; delaying them destroys perceived responsiveness and lowers overall job completion throughput across the mixed workload.
 
 ---
 
@@ -758,10 +699,8 @@ Look at what happens when you flip priorities upside down (putting 10-hour heavy
 - **Result**: Severe increase in waiting/turnaround time for I/O-bound jobs and sharp drops in **both CPU and I/O device utilization**.
 
 #### IN DETAIL
-Imagine a grocery checkout lane with 10 people buying a single bottle of water (**I/O-bound processes**, needing 1 second at the register) standing behind 1 person with three overflowing shopping carts (**CPU-bound process**, needing 15 minutes).
-Under **FCFS** (strict line, no express lane, no preemption):
-- Everyone with 1 bottle waits 15 minutes just to spend 1 second at the register! Their average waiting time skyrockets.
-- Worse for the whole system: while the CPU is busy scanning the 3 carts, the disk/I/O lanes sit empty doing zero work! Then all 10 water-bottle buyers leave to wait on I/O at once, leaving the CPU sitting completely idle! That traffic jam is called the **Convoy Effect**.
+First-Come, First-Served (**FCFS**) exhibits the classic **Convoy Effect** because it is strictly non-preemptive and ignores remaining burst durations:
+- **Mathematical Delay Amplification**: If one CPU-bound process arrives just ahead of $k$ short I/O-bound processes (say CPU burst $B = 100\text{ ms}$, short bursts $b = 1\text{ ms}$), all $k$ short processes wait the full $100\text{ ms}$ in the Ready Queue while all I/O peripherals sit idle. Once the CPU-bound process finally yields for I/O, the $k$ I/O jobs flash through $1\text{ ms}$ CPU bursts and immediately bunch up together back in I/O queues—repeatedly creating periodic CPU idle valleys followed by long I/O-bound starvation delays.
 
 ---
 
@@ -774,7 +713,9 @@ Under **FCFS** (strict line, no express lane, no preemption):
 - **Example**: If a low-priority batch process (or infinite loop) holds the CPU and an urgent **high-priority / real-time** process (or interactive user event) becomes ready via an interrupt, the urgent process cannot run until the running process voluntarily yields—violating real-time deadlines and hurting interactive response time.
 
 #### IN DETAIL
-Suppose a simple non-preemptive OS starts running a heavy scientific simulation that won't touch I/O for 60 seconds. Half a second later, a pacemaker monitor or audio-playback thread wakes up needing 1 ms of CPU to avoid skipping or missing a hard deadline! Because the scheduler cannot preempt the running job, the urgent task sits helplessly in the ready queue for 59.5 seconds—making non-preemptive scheduling unusable for interactive or hard real-time workloads.
+Non-preemptive scheduling creates **unbounded worst-case scheduling latency**, making it structurally incompatible with multi-user time-sharing and real-time guarantees:
+- **Arbitrary CPU Hold Duration**: Once any process enters `Running` state, neither timer interrupts nor higher-priority wakeups can reclaim the core until that thread explicitly invokes a blocking syscall, exits, or executes `yield()`.
+- **Cascading Failure Modes**: An infinite compute loop freezes an entire uniprocessor system permanently; even well-behaved long computations violate strict real-time deadlines (e.g., audio buffer underflows, sensor drop-outs, or safety-critical control loops) whenever high-priority tasks become runnable mid-burst.
 
 ---
 
@@ -792,7 +733,9 @@ Suppose a simple non-preemptive OS starts running a heavy scientific simulation 
 - **Justification**: **Processor affinity** tries to keep a process executing on the exact same CPU core to preserve its warm L1/L2 cache state and avoid costly cache misses. Conversely, **load balancing** (via push or pull migration) actively moves processes away from overloaded cores onto idle cores, which breaks processor affinity and invalidates cache warmth—creating a direct performance trade-off.
 
 #### IN DETAIL
-Think of **Processor Affinity** as keeping a chef at their own prepped kitchen station (all knives and ingredients already warm in their local cache!). **Load Balancing** taps that chef on the shoulder and yells *"Switch to Station #4 because it's empty!"*—evening out the workload across cores, at the exact cost of leaving behind all their warm cache contents!
+**Processor Affinity** and **Load Balancing** pursue fundamentally competing hardware vs. queueing objectives in Symmetric Multiprocessing (SMP) kernels:
+- **Microarchitectural Basis of Affinity**: Keeping thread $T$ pinned to Core $k$ preserves warm **L1/L2 private caches** and active **TLB translation entries** across context switches, avoiding massive compulsory cache-miss storms and memory-bus invalidation traffic.
+- **Load-Balancing Trade-off**: If Core $k$'s run queue accumulates multiple runnable threads while Core $j$ sits idle, leaving $T$ on Core $k$ wastes compute capacity across Core $j$. Pulling or pushing $T$ via migration evens out core queue depths (**work conservation**) at the immediate cost of invalidating $T$'s warm private cache state on Core $k$ and forcing cold cache re-population on Core $j$.
 
 ---
 
@@ -813,12 +756,9 @@ Think of **Processor Affinity** as keeping a chef at their own prepped kitchen s
    - **Signal Memory**: Semaphore `signal()` increments the counter and is remembered for future `wait()` calls; monitor `c.signal()` has **no effect (is lost)** if no thread is currently waiting on `c`.
 
 #### IN DETAIL
-Think of a monitor like a one-person bank vault room: only one person is allowed inside at a time. Suppose a customer (Consumer) walks in to withdraw \$100, opens the cash drawer, and finds it **empty**!
-- If the customer sits down inside the vault and refuses to leave until money appears, the Teller (Producer) can **never enter the vault** to refill the drawer—permanent deadlock!
-- **Condition variables** give the vault a waiting bench *just outside the lock*: `empty.wait()` **simultaneously locks the customer onto the waiting bench AND unlocks the vault door** so the Teller can step inside, deposit cash, and ring the bell (`empty.signal()`)!
-
-**Key Semantic Contrast**:
-- Semaphore `wait()` decrements a counter and blocks only if $\le 0$ (and `signal()` persists in the counter), whereas Monitor `c.wait()` **atomically releases the monitor lock and always blocks unconditionally** (and `c.signal()` is lost if nobody is waiting).
+A **Monitor** uses two distinct synchronization constructs—an **implicit mutual-exclusion entry lock** plus explicit **condition variables (`c.wait`/`c.signal`)**—to separate mutual safety from conditional coordination:
+- **Deadlock Without Condition Variables**: Only one process may execute inside monitor procedures concurrently. If a Consumer acquires the monitor lock and sees `buffer_count == 0`, simply spinning or calling semaphore-style sleep *while holding the monitor lock* prevents any Producer from ever entering `insert()` to increment `buffer_count`.
+- **Atomic Release–Block–Reacquire Contract**: Condition `not_empty.wait()` moves the Consumer onto `not_empty`'s wait queue and atomically unlocks the monitor boundary. When a Producer deposits an item and invokes `not_empty.signal()`, one blocked Consumer moves toward monitor re-entry, reacquiring mutual exclusion cleanly before resuming.
 
 ---
 
@@ -848,10 +788,9 @@ Xen divides system execution across **4 hardware privilege levels (Rings 0–3)*
    - *Examples*: Executing standard application computations (`gcc`, web server logic); invoking user-space system calls (`write()`, `malloc()`) that trap into the Guest OS in Ring 1.
 
 #### IN DETAIL
-Look at why standard 2-mode hardware wasn't enough for **Xen** (`xen.pdf`):
-- In normal Linux without virtualization, Linux sits in **Ring 0** (god mode) and user apps sit in **Ring 3**.
-- When Xen runs *multiple* Guest OSes on one physical server, Xen **cannot** put a Guest Linux kernel in **Ring 0**, or that guest could steal other VMs' memory or crash the whole physical server! And Xen **cannot** put the Guest Linux kernel in **Ring 3**, or the Guest's own user apps could tamper with the Guest Linux kernel!
-- Luckily, x86 already had **Ring 1** sitting unused! So Xen keeps **Ring 0** for itself, drops Guest OS kernels into **Ring 1** (replacing sensitive hardware instructions with safe **hypercalls** to Xen), leaves **Ring 2** empty, and keeps Guest apps in **Ring 3**!
+Traditional OSes require only **two hardware privilege domains** (Kernel Mode `Ring 0` vs. User Mode `Ring 3`), whereas **Xen Paravirtualization** exploits x86's four protection rings to preserve **two distinct security boundaries** simultaneously without hardware virtualization extensions:
+- **Dual Isolation Requirement**: The Xen Hypervisor (`VMM`) must maintain sole absolute authority over physical MMU page tables, interrupts, and DMA hardware (**Ring 0**), preventing *any* guest OS from compromising host isolation or neighboring VMs. Simultaneously, each Guest OS kernel must remain strictly isolated from its own untrusted user applications.
+- **Ring De-Privileging & Ring Compression**: Xen leaves `Ring 0` exclusively for the hypervisor, relocates the paravirtualized Guest OS kernel down to **`Ring 1`** (so privileged guest attempts trap cleanly into Xen or invoke fast `int 0x82` **Hypercalls**), and leaves Guest user applications in **`Ring 3`** (keeping `Ring 2` optionally for guest middleware or unused), enforcing full hypervisor-to-guest AND kernel-to-user isolation inside native x86 segment/ring protection.
 
 ---
 
@@ -871,11 +810,9 @@ If the OS swaps out Process $P_1$ to disk while it still has an active/pending D
   - **Double Buffering (Kernel Buffers)**: Perform all DMA into fixed kernel-space buffers, then copy to user memory only when the process is resident.
 
 #### IN DETAIL
-Suppose Process A asks the disk controller: *"Fetch 4 KB from the disk and drop it into physical RAM room #5."* The disk takes 10 ms, so the OS puts Process A to sleep and swaps Process A out to disk to make room for Process B. The OS hands physical room #5 to Process B!
-
-Ten milliseconds later, the clueless disk controller finishes fetching Process A's data and faithfully writes it straight into **physical room #5**—smashing right over Process B's variables or code! Process B crashes unpredictably or reads Process A's private data!
-
-That's why OS kernels either **pin** I/O pages in RAM so they cannot be swapped out during active DMA, or **double-buffer** I/O through pinned kernel memory buffers first.
+Swapping out a process while asynchronous DMA I/O remains in flight violates kernel/device buffer ownership invariants:
+- **Orphaned Physical DMA Frame Hazard**: Once the scheduler authorizes a disk/NIC controller via physical buffer address `PA_buf`, the DMA engine transfers incoming bytes asynchronously over the memory bus completely independent of OS scheduling or page-table moves. If the OS swaps out Process $P_1$ and reassigns `PA_buf` to Process $P_2$, arriving DMA traffic silently overwrites $P_2$'s live data (**silent memory corruption**).
+- **Canonical Kernel Defenses**: Production OSes either **pin (`mlock`/wire)** user DMA buffers in non-swappable physical frames for the I/O lifetime, or **double-buffer (bounce-buffer)** transfers through permanently pinned kernel space before copying safely into pageable user memory upon completion.
 
 ---
 
@@ -925,15 +862,9 @@ That's why OS kernels either **pin** I/O pages in RAM so they cannot be swapped 
 - **Recommendation**: Recommend **LRU** (or an efficient Clock approximation in real hardware). Unlike FIFO—which exhibits **Belady's Anomaly** on Trace 2 (faults **rose from 9 to 10** when RAM increased from 3 to 4 pages!)—LRU is a stack algorithm guaranteed **never** to suffer Belady's Anomaly and exploits temporal locality effectively (beating FIFO on Trace 1 at 3 frames and Trace 2 at 4 frames).
 
 #### IN DETAIL
-Look at **Trace 2** (`1, 2, 3, 4, 1, 2, 5, 1, 2, 3, 4, 5`)—that's the famous textbook sequence specifically constructed to expose **Belady's Anomaly** in FIFO!
-- With **3 frames**, FIFO suffered **9 faults** (getting lucky hits on `1, 2` and `5` at the end!).
-- You buy more RAM (**4 frames**), expecting fewer faults—and FIFO actually gets **WORSE (10 faults!)** because with 4 frames, `1` and `2` survived just long enough for `5` to evict `1` right before `1` was accessed, triggering a chain reaction of misses!
-- **LRU** is mathematically guaranteed to be **anomaly-free**: adding more RAM frames can *never* increase page faults under LRU!
-
-**Why FIFO Also Lost on Trace 1 Alone (2023 Q2b Check)**:
-Look closely at why FIFO stumbled right at step 6 (`3` arrives) and step 7 (`0` arrives):
-- Pages `0` and `1` were just actively used (`0, 1, 2, 0, 1`), yet FIFO kicked `0` out simply because `0` arrived first—forcing an immediate extra page fault on the very next instruction when `0` was needed again, which then kicked `1` out right before `1` was needed!
-- **LRU** recognized that `2` hadn't been touched since step 3, evicted `2` instead, and kept `0` and `1` warm in memory—cutting misses from **7 down to 5**!
+Page replacement policies differ crucially on whether they obey the **Inclusion Property (Stack Algorithms)**:
+- **Belady's Anomaly in FIFO**: FIFO evicts purely by **resident insertion timestamp**, completely ignoring recent access frequency (**temporal locality**). A frequently referenced page remains on the head of the queue regardless of hits (`1, 2`), causing non-monotonic fault counts where expanding RAM from 3 frames to 4 reshuffles eviction cadence unfavorably (**9 faults $\to$ 10 faults** on `1,2,3,4,1,2,5,1,2,3,4,5`).
+- **Stack Property Guarantee (LRU / Optimal)**: At every reference step $t$, the set of resident pages inside a $k$-frame LRU cache is strictly a subset of the pages inside a $(k+1)$-frame LRU cache ($M_t(k) \subseteq M_t(k+1)$). Consequently, increasing physical frames can *never* raise page faults under LRU or Belady's Optimal algorithm.
 
 ---
 
@@ -952,11 +883,9 @@ Look closely at why FIFO stumbled right at step 6 (`3` arrives) and step 7 (`0` 
 2. **Resulting Disk Writes**: Modifying `atime` dirties the inode block in memory, which must eventually be flushed back as **block-level write operations to disk** (even though the user only requested a `read`!).
 
 #### IN DETAIL
-Wait—when you run `cat /dir1/file.txt`, you think *"I'm only reading!"*, right?
-Under the hood, the file system keeps a diary entry (**inode**) for every file and directory recording *"When was this file last accessed (`atime`)?"*
-- To open `/dir1/file.txt`, the OS traverses `/` and `/dir1`, and reads `file.txt`'s data blocks.
-- Each read updates the **`atime`** timestamp in the corresponding inodes—forcing the OS to write those modified inode blocks back to the disk!
-*(Fun real-world note: on busy Linux servers with millions of reads, updating `atime` on every read caused so many extra disk writes that modern Linux introduced `relatime` and `noatime` mount options to skip unnecessary `atime` writes!)*
+Even read-only file workloads trigger hidden metadata disk writes in default POSIX-compliant file systems due to mandatory **access-timestamp (`atime`) bookkeeping**:
+- **Write Amplification from `atime`**: Opening or reading a file requires the VFS to update the inode's `st_atime` field in memory (marking the inode buffer dirty), flushing periodic dirty-inode block writes back to disk—hurting flash SSD wear and saturating read-heavy web/mail servers.
+- **Mitigation Mount Options**: Modern Linux distributions default to **`relatime`** (updating `atime` only if it predates `mtime`/`ctime` or exceeds 24 hours) or **`noatime`** (disabling access timestamp updates entirely to keep pure read paths strictly read-only at block layer).
 
 ---
 
@@ -981,8 +910,9 @@ Under the hood, the file system keeps a diary entry (**inode**) for every file a
    - *Disadvantage*: Writes bottleneck on the single shared parity disk.
 
 #### IN DETAIL
-- **RAID 3** is like 4 typists typing every single word together letter-by-letter: super fast for typing one giant novel sequentially, useless if 4 different people want to check 4 different sentences simultaneously!
-- **RAID 4** gives each disk whole paragraphs (blocks), so 4 independent readers can read 4 different disks at the exact same time—while still guaranteeing 1-disk fault tolerance via the parity disk!
+**RAID 3** and **RAID 4** both dedicate **one XOR parity disk ($P = D_1 \oplus D_2 \oplus \dots \oplus D_{N-1}$)** alongside $N-1$ data disks to survive single-disk failure, yet their **striping granularity** splits them onto opposite performance regimes:
+- **RAID 3 (Bit/Byte-Level Striping, Synchronized Spindles)**: Splits every sequential file word bit-by-bit across all $N-1$ drives rotating in lockstep. Every single I/O activates *all* spindles simultaneously—delivering $(N-1)\times$ raw **sequential streaming bandwidth** while limiting random concurrency strictly to **1 request at a time**.
+- **RAID 4 (Block-Level Striping, Independent Spindles)**: Places whole multi-kilobyte blocks onto separate disks. Small independent reads hitting distinct blocks execute simultaneously on independent disk arms—multiplying random-read IOPS up to $(N-1)\times$ at the cost of lower single-file streaming speedup unless files span multiple blocks.
 
 ---
 
@@ -1008,10 +938,9 @@ Under the hood, the file system keeps a diary entry (**inode**) for every file a
 | **Random Reads** | Reads from $N-1$ data disks only (parity disk stays mostly idle during normal reads). | Reads spread across **all $N$ disks** (higher read parallelism). |
 
 #### IN DETAIL
-Imagine 4 cashiers and 1 ledger book:
-- **RAID 3** forces all 4 cashiers to hold one pen together to write 1 bit each of every single number! Fast if you're printing one massive continuous report, terrible if 4 different customers want quick receipts at once!
-- **RAID 4** gives each cashier their own block of receipts, so **4 customers can read different data in parallel**! **Catch**: Whenever *anyone* writes/changes a receipt, they have to walk over to the **single dedicated Parity Desk (Disk 5)** to update the checksum. So if 4 threads try to do random small writes simultaneously, they all crash into a traffic jam at Disk 5!
-- **RAID 5** simply removes the dedicated Parity Desk and spreads the parity entries across *all 5 desks* in rotation. Now writes to different stripes hit different parity disks in parallel, AND normal reads utilize all 5 disks instead of leaving Disk 5 idle! *(Note: both RAID 4 and RAID 5 still have the "read-modify-write" small-write penalty per single write: 2 reads + 2 writes.)*
+**RAID 4** outperforms **RAID 3** on multi-user workloads by shifting from fine-grained bit/byte interleaving to **independent block-level striping**, yet inherits a fundamental write-path scalability flaw resolved by **RAID 5**:
+- **Why RAID 4 Bottlenecks on Writes**: Even though independent data blocks reside across $N-1$ distinct drives, *all* XOR parity blocks across every stripe sit exclusively on **one dedicated parity drive (`Disk N`)**. Consequently, two unrelated writes to `Block A (Disk 0)` and `Block B (Disk 2)` must *both* read and overwrite `Disk N`—serializing 100% of random writes onto a single overloaded actuator while leaving `Disk N` completely idle on reads.
+- **RAID 5 Rotating Distributed Parity**: Eliminates the dedicated parity drive by cycling parity placement diagonally across all $N$ disks (`Stripe i` stores parity on disk $i \bmod N$). Disjoint stripe writes update distinct parity drives simultaneously in parallel, and normal reads distribute across all $N$ spindles cleanly (though each individual small write still incurs 4 I/Os via Read-Modify-Write).
 
 ---
 
@@ -1030,9 +959,9 @@ Imagine 4 cashiers and 1 ledger book:
 | **Complexity & Sequence Numbers** | **Low complexity**: Uses cumulative ACKs and a single sender timer; requires sequence space $\ge W + 1$. | **High complexity**: Requires individual ACKs (or SACKs), per-frame timers, and sequence space $\ge 2W$ (half the sequence space) to avoid wrap-around ambiguity. |
 
 #### IN DETAIL
-Suppose you mail 10 numbered letters (./Topic_10_Networking_Foundations_Data_Link_and_MAC.md#1 to #10), and Letter #3 gets lost in the rain:
-- **Go-Back-N** is simple-minded at the receiver: when Letters #4–#10 arrive, the receiver shouts *"I'm still waiting for #3!"* and throws #4–#10 into the trash! So you have to re-mail #3, #4, #5, #6, #7, #8, #9, and #10 all over again! Cheap receiver, terrible waste of bandwidth if lines are noisy or very fast/long!
-- **Selective Repeat** puts #4–#10 neatly into a holding shelf (**receiver buffer**) and simply asks: *"Please resend ONLY #3!"* When #3 arrives, it delivers #3–#10 cleanly in order. Saves massive bandwidth, at the cost of extra buffer memory, per-packet timers, and needing twice as many sequence numbers ($2W$) so old buffered packets aren't confused with wrapped-around new ones!
+**Go-Back-N (GBN)** and **Selective Repeat (SR)** present a classic **receiver complexity vs. link-utilization efficiency** trade-off across high Bandwidth-Delay Product (**BDP**) or noisy channels:
+- **Receiver State vs. Re-transmission Waste**: GBN keeps receiver logic trivial ($W_R = 1$, zero out-of-order memory, single cumulative ACK + single base timer), unconditionally discarding *all* frames arriving past a gap (`N+1..N+k`). When links have high bit-error rates or large $B \times \text{RTT}$ windows, one corrupted frame forces re-transmitting an entire pipe full of $W$ already-delivered frames. **Selective Repeat** buffers valid out-of-order frames up to $W_R$, issues selective ACKs/NAKs, and retransmits *only* the lost frame.
+- **Sequence-Space Aliasing Constraint**: Because SR accepts buffered out-of-order frames across an active receive window $[R_{\text{base}}, R_{\text{base}} + W_R - 1]$, ambiguity occurs if the sender retransmits old unacknowledged frames while the receiver advances its window and wraps sequence numbers (`mod 2^k`). Preventing old/new sequence overlap strictly requires **$W_S + W_R \le 2^k \implies W_{\max} = 2^{k-1}$** (only half the sequence space usable, vs. $2^k - 1$ for GBN).
 
 ---
 
@@ -1052,9 +981,9 @@ Suppose you mail 10 numbered letters (./Topic_10_Networking_Foundations_Data_Lin
    - In Slotted ALOHA, frames can only collide if another station transmits in the **exact same slot**—cutting the vulnerable period in half from **$2T$ to $T$** and doubling maximum throughput to $S_{\max} = \frac{1}{e} \approx \mathbf{36.8\%}$.
 
 #### IN DETAIL
-Think of people speaking on a shared walkie-talkie channel, each message taking **1 minute**:
-- In **Pure ALOHA**, you start talking whenever you want. If Alice starts at `12:01:30`, she overlaps and ruins Bob's message if Bob started *anytime* between `12:00:30` and `12:02:30`—a **2-minute vulnerable window** ($2T$)! Almost every message gets clipped at the front or back!
-- In **Slotted ALOHA**, a global clock beeps once every minute (`12:00`, `12:01`, `12:02`...). Everyone is forced to start talking *only* on the beep! Now Bob's message at `12:01` can *only* collide if someone else also starts at `12:01`—cutting partial overlaps completely and shrinking the danger zone from $2T$ to **$1T$**, which mathematically doubles peak channel efficiency from **18.4% to 36.8%**!
+**Pure ALOHA** and **Slotted ALOHA** isolate how **discrete time synchronization** shrinks contention overlap by half on uncoordinated random-access broadcast channels:
+- **Vulnerable Window Proof ($2T$ vs. $T$)**: Consider fixed-duration frames of transmission time $T_{\text{fr}}$. In **Pure ALOHA**, stations transmit asynchronously whenever ready; a frame starting at $t_0$ suffers destructive partial overlap if *any* peer starts in $(t_0 - T_{\text{fr}},\; t_0 + T_{\text{fr}})$—a continuous vulnerable span of **$2 T_{\text{fr}}$**. Enforcing discrete global slot ticks of length $T_{\text{fr}}$ in **Slotted ALOHA** forces transmissions to align strictly with slot boundaries, eliminating partial tail/head collisions so interference occurs *only* if another station generates a frame during the exact same preceding slot—halving the vulnerable interval to **$1 T_{\text{fr}}$**.
+- **Poisson Throughput Derivation**: Under Poisson arrival load $G$ frames per frame-time, $P(\text{0 peers in } 2G) = e^{-2G} \implies S = G e^{-2G}$ peaks at $G = 0.5$ (**$\frac{1}{2e} \approx 18.4\%$**), whereas Slotted ALOHA yields $S = G e^{-G}$ peaking at $G = 1$ (**$\frac{1}{e} \approx 36.8\%$**).
 
 ---
 
@@ -1074,8 +1003,8 @@ Think of people speaking on a shared walkie-talkie channel, each message taking 
    - To achieve high throughput without stalling while waiting for end-to-end ACKs, the sender must keep $\text{BDP} = \text{Bandwidth} \times \text{RTT}$ bytes unacknowledged in flight simultaneously. Since transport RTT is vastly larger than single-link RTT, the transport layer requires a **much larger sliding window** (and larger host buffers).
 
 #### IN DETAIL
-Think of pouring water into a garden hose vs. a 10-kilometer cross-city pipeline:
-- **Data Link Layer** is a 2-meter garden hose between two directly wired neighbors. Water reaches the other end almost instantly, so you only need a small cup of water in transit at once (small sliding window).
-- **Transport Layer (TCP)** is a 10,000-km Internet path passing through 15 routers from Hyderabad to New York ($\text{RTT} \approx 200\text{ ms}$). On a 1 Gbps link, during the 200 ms you wait for the first ACK to return, you can pump $10^9 \times 0.2 / 8 = \mathbf{25\text{ MB}}$ of data into the pipe! If your sliding window were tiny (like a data-link window of 8 packets), the sender would finish 8 packets in microseconds and sit idle 99.9% of the time waiting on ACKs!
+Optimum pipeline window sizing scales linearly with each layer's **Bandwidth-Delay Product ($\text{BDP} = B \times \text{RTT}$)**—explaining orders-of-magnitude differences between Link Layer and Transport Layer windows:
+- **Single-Hop Data Link Scope**: Link frames traverse a single adjacent physical wire/fiber (`RTT` $\approx \mu$s on LANs), yielding tiny BDP values where small sliding windows (`4–32` frames) already saturate wire capacity.
+- **End-to-End Multi-Hop Transport Scope**: Transport segments cross dozens of continental/intercontinental routers and queued paths (`RTT` $\approx 50\text{--}300\text{ ms}$) across gigabit/terabit links, creating massive in-flight BDPs ($10\text{ Gbps} \times 100\text{ ms} = 125\text{ MB}$ $\implies > 80,000$ segments!). Maintaining $100\%$ pipe utilization without stalling idle waiting for ACKs mandates large sliding windows (`64 KB` base + RFC 1323 **Window Scaling** shifts up to **$1\text{ GB}$**).
 
 ---

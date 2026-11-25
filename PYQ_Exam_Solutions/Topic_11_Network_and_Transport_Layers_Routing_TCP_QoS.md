@@ -57,9 +57,9 @@ In **Link State Routing** (used in OSPF), every router builds a complete map of 
 5. **Compute Shortest Paths**: Every router holds the identical global graph and runs **Dijkstra's Shortest Path First (SPF)** algorithm locally to populate its routing table.
 
 #### IN DETAIL
-Compare **Distance Vector** vs. **Link State**:
-- In **Distance Vector**, routers gossip only *"Here's how far I think everyone is"* to immediate neighbors (slow convergence, count-to-infinity bugs!).
-- In **Link State**, every router announces ONLY *"Here are my direct neighbors and link costs"* to **everyone in the whole network** (flooding!). Once every router receives everyone else's puzzle pieces, every router draws the exact same global road map and runs **Dijkstra's algorithm** independently—converging fast with zero routing loops!
+**Link State Routing (OSPF)** achieves rapid loop-free global convergence by decoupling **topology dissemination** from **shortest-path calculation**:
+- **Flooding Phase vs. Local Dijkstra**: Unlike Distance Vector (where routers transmit opaque accumulated path-sum guesses to neighbors only), each Link State router probes only its **directly attached neighbors** to measure incident link costs (`Hello`/`LSP`), and reliably floods that compact Link State Packet across *every* router via sequence-numbered hop-by-hop flooding.
+- **Deterministic Convergence**: Once flooded LSPs populate an identical Link-State Database (**LSDB**) across all nodes, every router independently executes **Dijkstra's single-source shortest-path algorithm ($O(E \log V)$)** on the shared global topology—eliminating asynchronous Bellman-Ford transient bouncing and count-to-infinity loops entirely.
 
 ---
 
@@ -93,11 +93,9 @@ Given link costs $c(C, B) = 6$, $c(C, D) = 3$, $c(C, E) = 5$:
   - **Outgoing Lines / Next Hops**: `(B, B, -, D, E, B)`
 
 #### IN DETAIL
-Watch how simple and mechanical Distance Vector Routing is!
-Router $C$ doesn't know the whole map—it only knows the cost to step onto its three neighbor bridges ($B=6$, $D=3$, $E=5$). When $B$, $D$, and $E$ mail in their distance vectors (each a 6-tuple for `A, B, C, D, E, F`), $C$ simply adds $6$ to every number from $B$, $3$ to every number from $D$, and $5$ to every number from $E$, then picks the smallest total column-by-column (always keeping $C \to C = 0$)!
-
-**Scan Trivia (2022 Endsem Q11 Check)**:
-- In `OSN_end_2022_M_key.pdf`, the printed solution key had a minor typo `6+1=18` on D's entry via B (correct is `6+1=7`), which fortunately did not alter the final routing table `(11, 6, 0, 3, 5, 8)` via `(B, B, -, D, E, B)` because direct `C→D = 3 < 7`!
+**Distance Vector Routing** implements **distributed asynchronous Bellman–Ford relaxation** purely from local link costs and neighbor-advertised cost vectors:
+- **Bellman–Ford Transition Equation**: Each router $x$ stores solely direct edge costs $c(x, v)$ to immediate neighbors $v \in N(x)$ plus the latest distance vectors $\mathbf{D}_v = [D_v(y)]_{y \in V}$ advertised by each neighbor. Recomputing $x$'s new distance table is completely mechanical: $D_x(y) = \min_{v \in N(x)} \{ c(x, v) + D_v(y) \}$, setting the corresponding minimum-cost neighbor $v^*$ as forwarding `Next Hop` (and keeping self-distance $D_x(x) = 0$).
+- **Convergence Mechanics**: Without global graph visibility, good cost reductions propagate at 1 hop per periodic exchange round, whereas arbitrary topology partitioning relies on loop-avoidance safeguards because old indirect neighbor paths retain stale finite hop estimates.
 
 ---
 
@@ -121,9 +119,9 @@ Router $C$ doesn't know the whole map—it only knows the cost to step onto its 
    - **Link State (Dijkstra)**: Floods **only local link costs to ALL routers**; fast convergence, loop-free global map, higher memory/LSA flooding overhead.
 
 #### IN DETAIL
-**"Good news travels fast, bad news travels slowly"**:
-- If a brand-new fast link appears (**good news**), every neighbor jumps onto it at 1 hop per round!
-- If $A\text{--}B$ dies (**bad news**), $B$ forgets $C$ got its path *from $B$ itself*! So $B$ falls for its own echoed lie via $C$ (`3 -> 4 -> 5 -> 6...`), creating a temporary black hole loop! **Poison Reverse** tells $C$ to shout back *"My distance to A via you is INFINITY"*, breaking 2-hop ping-pong loops cleanly (though 3+ router rings still need Link State or RIP hold-downs!).
+The **Count-to-Infinity** pathology exposes the asymmetric propagation speed of **Bellman–Ford local distance gossip** under link failure:
+- **Good News vs. Bad News Asymmetry**: When a new lower-cost link turns on, neighbors monotonically decrease $D_x(y)$ in one exchange round per hop ($O(\text{diameter})$). Conversely, when edge $A\text{--}B$ fails, $B$ invalidates direct route $1$ and scans neighbors for alternates—seeing $C$'s previously advertised $D_C(A) = 2$ without realizing $C$'s route traverses $B$ itself! $B$ switches to $C$ with cost $3$, prompting $C$ to bump to $4$, creating a persistent routing loop counting slowly toward RIP's `16 = ∞` threshold.
+- **Scope & Limits of Mitigations**: **Split Horizon** omits advertising $y$ back out the learning interface $v$, while **Poison Reverse** advertises $D_C(A) = \infty$ back to $B$—eliminating *2-node ping-pong loops* instantaneously, yet still failing across **3-node or larger cyclic topologies** (where Link State flooding becomes mandatory).
 
 ---
 
@@ -147,10 +145,9 @@ Router $C$ doesn't know the whole map—it only knows the cost to step onto its 
   - **Reverse Path Forwarding (RPF)** is favored in distributed Distance-Vector / hop-by-hop networks where routers do **not** know the full sink tree, because RPF needs **zero extra routing tables or spanning-tree setup**—it uses only the existing unicast routing table!
 
 #### IN DETAIL
-Think of spreading news from person $B$ to a town of $N = 10$ houses:
-- **Sink Tree** draws a clean family tree with $N-1 = 9$ arrows connecting all 10 houses with zero loops. You send **exactly 9 messages** total—impossible to beat!
-- **Reverse Path Forwarding (RPF)** doesn't require anyone to draw a town map first. Every house simply checks: *"Did this message from $B$ arrive on the shortest road back to $B$?"* If **Yes**, forward it down every *other* driveway (even if the neighbor already heard it from someone else, who will then discard the duplicate!). If **No**, discard it!
-- Notice the tradeoff: Sink Tree uses minimal packets ($N-1$) and wastes zero bandwidth, whereas RPF is super easy to implement when routers only know their own unicast next-hops! *(Since `OSN_end_2021_M.pdf` omitted the figure, state this distinction clearly in an exam if ever shown a similar missing/unprinted graph.)*
+Network-layer broadcast routing contrasts **minimal-overhead tree computation (`Sink Tree`)** against **stateless unicast-table reuse (`Reverse Path Forwarding / RPF`)**:
+- **Minimal Sink Tree (`N - 1` packets)**: Forwarding strictly along a loop-free spanning tree rooted at source $B$ sends every broadcast packet across each edge of the tree exactly once—achieving the theoretical lower bound of **$N - 1$** transmissions for $N$ nodes, at the operational cost of maintaining global spanning-tree state at every router.
+- **Reverse Path Forwarding (`E`–`2E` transmissions, zero global tree state)**: Router $R$ receiving broadcast packet $P$ from source $B$ on incoming interface $I$ checks its existing unicast forwarding table: if $I$ matches $R$'s shortest path **back toward $B$**, $R$ floods $P$ out every *other* interface; otherwise $P$ arrived via a longer cycle and is dropped silently. RPF prevents infinite looping cleanly using existing Distance Vector/Link State tables while generating redundant duplicate link packets later pruned at neighbors.
 
 ---
 
@@ -167,7 +164,9 @@ Think of spreading news from person $B$ to a town of $N = 10$ houses:
 - **Justification**: In flat routing, every router knows the exact topology to every destination and always selects the globally shortest path. In hierarchical routing, routers only route via cluster representatives/entry points without visibility into internal links of remote clusters, which often forces suboptimal (longer) paths—a trade-off accepted to shrink routing table sizes in huge networks.
 
 #### IN DETAIL
-Imagine driving from one small suburb to a neighboring suburb just across a river, but hierarchical GPS forces all inter-city traffic to pass through the **City Central Highway Exit** first! That adds extra kilometers (**longer path**), yet it saves your GPS from having to memorize every single neighborhood side-street across the entire country (**huge memory/routing-table savings**)!
+**Hierarchical Routing** trades slight **path-length suboptimality** for dramatic **forwarding-table and control-plane scalability** as internetwork node counts $N$ scale globally:
+- **Logarithmic Table Compression ($O(k \cdot N^{1/k})$)**: Flat routing requires every router worldwide to store and update individual entries for all $N$ destinations ($O(N)$ state and $O(N^2)$ control flooding). Partitioning routers into $k$-level regions/ASes lets internal routers store exact distances only within their local region plus a single aggregated entry per external region—reducing table memory from $N$ entries down to optimal **$e \ln N$** levels for $k$-level hierarchies (`Kamoun–Kleinrock bound`).
+- **Path Inflation Penalty**: Because cross-region traffic must funnel through designated border/area-gateway nodes rather than direct intra-region shortcuts across physical borders, actual hop count or delay exceeds flat shortest-path lengths.
 
 ---
 
@@ -194,9 +193,9 @@ Imagine driving from one small suburb to a neighboring suburb just across a rive
    - **L2 Switching / Delivery**: The local L2 switch inspects the Destination MAC, learns/looks up the destination switch port in its MAC forwarding table, and delivers the frame directly to `192.168.1.32` (never involving the default gateway router).
 
 #### IN DETAIL
-Even though the question mentions the router's IP/MAC and public IP as context (distractors!), the very first thing your OS network stack does before sending *any* packet is check: **"Is the destination in my own neighborhood (`/24` subnet)?"**
-- `192.168.1.25` and `192.168.1.32` share the same first 24 bits (`192.168.1.*`). They are right next door on the same LAN switch!
-- So you **never bother the router**. Your machine simply uses **ARP** to find the neighbor's MAC address (`8A:9B:1C:2F:9F:6D`), puts its own MAC as sender and the neighbor's MAC as destination on the Ethernet frame, and the local switch delivers it directly!
+Evaluating same-subnet host-to-host delivery highlights the strict **layering decision tree** executed by every OS network stack before emitting a frame:
+- **L3 Longest-Prefix / Subnet Masking**: Before touching ARP or default-gateway routes, the kernel compares `Src_IP & Netmask` (`192.168.1.25/24 -> 192.168.1.0`) against `Dst_IP & Netmask` (`192.168.1.32/24 -> 192.168.1.0`). Matching network prefixes confirm Layer-2 **direct reachability** on the local broadcast domain.
+- **L2 ARP Resolution & Switch Forwarding**: Because the destination resides on-link, the stack bypasses the default gateway completely, consults its ARP cache (or broadcasts an `ARP Request` for `192.168.1.32`), encapsulates the IP packet directly inside an Ethernet frame addressed to the target host's hardware MAC (`8A:9B:1C:2F:9F:6D`), and sends it through the Layer-2 switch directly without Layer-3 hop traversal.
 
 ---
 
@@ -221,10 +220,9 @@ Even though the question mentions the router's IP/MAC and public IP as context (
    - Destination router receives the packet at external IP `18.72.19.85`, performs reverse NAT/routing lookup for `10.8.17.65` on its internal `/24` interface (`10.8.17.89`), ARPs for `10.8.17.65` to obtain MAC `1A:2B:3C:4D:9C:5A`, and transmits the final Ethernet frame (`Src MAC = Dest Router internal MAC`, `Dst MAC = 1A:2B:3C:4D:9C:5A`) for delivery.
 
 #### IN DETAIL
-Think of **IP addresses (L3)** as the sender/receiver **street addresses on the envelope**, and **MAC addresses (L2)** as the **truck driver handing the package across each individual leg of the journey**:
-- Because `192.168.1.25` and `10.8.17.65` are in completely different cities (subnets) behind private NAT routers (`17.84.18.65` and `18.72.19.85`), your laptop cannot hand a packet directly to `1A:2B:3C:4D:9C:5A`—it doesn't even exist on your local switch!
-- Instead, your laptop hands the L2 envelope to **its local post office (Default Gateway Router MAC)**, while writing the **public destination IP** on the L3 packet inside.
-- Note also the exam's two small quirks: `192.168.1.x` and `10.8.17.x` are *private RFC 1918 IP addresses* (so over the public Internet, routers use **NAT** between `17.84.18.65` and `18.72.19.85`), and the printed router MAC `7G:...` has a non-hex `G` typo while its IP `172.18.12.92` doesn't match `192.168.1.x/24`—mentioning how private/public NAT + hop-by-hop L2 MAC rewriting works covers every mark cleanly!
+Cross-subnet routing demonstrates how **end-to-end Layer-3 IP addressing** cooperates with **hop-by-hop Layer-2 MAC encapsulation** and **NAT edge translation**:
+- **Subnet Mismatch & Gateway Arping**: Comparing `192.168.1.25/24` with `10.8.17.65/24` yields distinct network prefixes, instructing the source OS routing table (`0.0.0.0/0` default route) to resolve **only the Default Gateway Router's MAC address via ARP**. The outgoing Ethernet frame pairs immutable end-to-end L3 IP addresses with **link-local L2 MAC addresses** (`Dst MAC = Local Router MAC`).
+- **Hop-by-Hop L2 Rewriting & RFC 1918 NAT**: Each intervening L3 router strips the incoming L2 Ethernet header, inspects the L3 IP destination, rewrites `Src/Dst IP:Port` at **NAT boundaries** between private RFC 1918 subnets (`192.168.x` $\leftrightarrow$ `17.84.18.65` public WAN $\leftrightarrow$ `18.72.19.85` $\leftrightarrow$ `10.8.x`), decrements TTL, and builds a fresh L2 frame for the next physical hop.
 
 ---
 
@@ -248,9 +246,9 @@ Think of **IP addresses (L3)** as the sender/receiver **street addresses on the 
   4. **Acknowledge (Server $\to$ Client)**: Selected server replies with `DHCPACK`, confirming the IP lease so the host configures its interface.
 
 #### IN DETAIL
-When a brand-new laptop plugs into `172.18.20.x/24`, it has **no IP address yet**—so how can it even send/receive messages?
-- **DHCP** uses broadcast (`255.255.255.255`, MAC `FF:FF:FF:FF:FF:FF`) over UDP ports 67/68! Remember the mnemonic **D-O-R-A**: **D**iscover (*"Anyone handing out IPs?"*) $\to$ **O**ffer (*"Take `172.18.20.15` for 24 hrs!"*) $\to$ **R**equest (*"I'll take `172.18.20.15`!"*) $\to$ **A**cknowledge (*"Deal, it's yours!"*).
-- Why not the others? **DNS** turns domain names into IPs; **HTTP** transfers web pages; **ARP** finds a local MAC address *when you already know the IP*!
+Bootstrapping a host onto an unconfigured IP subnet solves a **circular Layer-3 dependency**: a client lacking an IP address, subnet mask, and default router cannot initiate standard unicast IP routing yet:
+- **Broadcast UDP DORA Bootstrap**: **DHCP** operates over UDP ports `68 -> 67` using L2 broadcast `FF:FF:FF:FF:FF:FF` and L3 limited broadcast `255.255.255.255` (with `Src IP = 0.0.0.0`). Through the four-phase **Discover $\to$ Offer $\to$ Request $\to$ Acknowledge** handshake keyed by a random client `XID` and client NIC MAC address, the local DHCP server leases `(Host IP, Netmask, Default Gateway IP, DNS Server IP, Lease TTL)`.
+- **Role Distinction**: **DNS** resolves already-configured IP hostnames over UDP/TCP port 53, **ARP** maps known on-link L3 IPs to L2 MACs, and **HTTP** operates exclusively over established TCP/IP sockets.
 
 ---
 
@@ -288,15 +286,10 @@ When a brand-new laptop plugs into `172.18.20.x/24`, it has **no IP address yet*
    - Encapsulates the IP packet inside an **Ethernet Frame** with `Src MAC = Node's NIC MAC`, `Dst MAC = Default Gateway Router's MAC`, appends a **32-bit CRC/FCS trailer**, and pushes bits onto the wire via the NIC driver.
 
 #### IN DETAIL
-Walk through this like flipping a light switch when you plug a brand-new laptop into campus Wi-Fi and open `http://anotherdomain.com`:
-1. **OS Foundations (Part a)**: You need NIC hardware drivers + a TCP/IP stack + sockets (`connect`/`send`), otherwise apps can't even talk to the wire.
-2. **Who am I? Where are they? (Part b)**:
-   - **DHCP** gives your laptop an identity card (`IP, Mask, Router IP, DNS Server IP`).
-   - **DNS** acts like a phonebook translating human name `"anotherdomain.com"` into `"179.20.10.6"`.
-3. **Packing the Russian Nesting Dolls (Part c)**:
-   - **Application Layer**: Writes the letter (`HTTP GET /`).
-   - **Transport Layer (TCP)**: Calls `179.20.10.6:80` to establish a reliable 3-way handshake, stamps ports/sequence numbers/checksum onto the TCP segment.
-   - **Link Layer**: Notices `"179.20.10.6"` isn't in the same room, uses **ARP** to find the local **Router's MAC address** (note: *NOT* the server's MAC!), wraps everything in an Ethernet frame with `Dst MAC = Router MAC` + CRC, and shoots it out the cable!
+Tracing a **cold-start web request (`http://anotherdomain.com`)** from an unconfigured NIC integrates the entire OS kernel networking subsystem across Layers 1–7:
+- **OS Device & Socket Infrastructure**: Requires NIC DMA ring drivers, a modular TCP/IP state machine, routing/ARP tables, and POSIX socket syscalls (`socket/connect/send/recv`) decoupling application streams from kernel frame assembly.
+- **Control-Plane Prerequisite Chain**: First **DHCP (DORA over UDP broadcast)** provisions host identity (`IP`, mask, gateway, DNS server); next **DNS (`UDP:53`)** queries via the default gateway (resolved via **ARP**) map hostname `"anotherdomain.com"` $\to$ IP `"179.20.10.6"`.
+- **Encapsulation Data Path**: Application emits HTTP payload $\to$ TCP establishes a **3-Way Handshake** toward `179.20.10.6:80` tagging sequence numbers/checksum $\to$ IP attaches global L3 headers and selects the default-gateway route $\to$ Link layer sets **`Dst MAC = Default Gateway Router MAC`** (via ARP) + CRC-32 FCS before NIC DMA transmission.
 
 ---
 
@@ -315,10 +308,9 @@ Walk through this like flipping a light switch when you plug a brand-new laptop 
    - **Routing Extension Header / Segment Routing (SRv6)** explicitly embeds or records an ordered list of intermediate router hops inside the packet header, and the **20-bit `Flow Label`** enables routers to consistently route/track packets belonging to the same path/flow.
 
 #### IN DETAIL
-Suppose you want to see every single router between your laptop and `google.com` over IPv6 (`traceroute6`):
-- You send Probe #1 with **`Hop Limit = 1`**. The *first* router subtracts 1 (`1 - 1 = 0`), drops it, and replies *"ICMPv6 Time Exceeded from Router 1!"*—boom, you know Hop 1!
-- Next you send Probe #2 with **`Hop Limit = 2`**. Router 1 passes it (`2 - 1 = 1`), Router 2 drops it (`1 - 1 = 0`) and replies *"From Router 2!"*—boom, you know Hop 2!
-- Repeating until you reach the destination maps the entire hop-by-hop path!
+**IPv6** streamlines router data-plane processing relative to IPv4 by relocating optional work to endpoints while preserving loop detection and path discovery:
+- **`Hop Limit` & Path Discovery (`traceroute6`)**: The 8-bit `Hop Limit` field replaces IPv4's `TTL`, decrementing by `1` at every Layer-3 router. When `Hop Limit` reaches `0`, the router discards the packet and emits an **ICMPv6 `Time Exceeded` (Type 3)** response exposing that hop's IP—allowing `traceroute6` to probe `Hop Limit = 1, 2, 3...` sequentially.
+- **Architectural Simplifications**: IPv6 removes **on-path router fragmentation** (mandating source-host **Path MTU Discovery** via ICMPv6 `Packet Too Big`) and drops the redundant **IP Header Checksum** (avoiding recalculating checksums at every router simply because `Hop Limit` changed, delegating end-to-end error checks to Layer-2 FCS and mandatory Layer-4 TCP/UDP pseudo-header checksums), while its $128$-bit address space removes address-exhaustion **NAT** necessity.
 
 ---
 
@@ -339,7 +331,9 @@ Suppose you want to see every single router between your laptop and `google.com`
    - Executes the **TCP/IP protocol stack**: performs 3-way handshake, segments the byte stream, attaches TCP/IP/Ethernet headers, computes checksums, handles timers/ACKs/retransmissions/flow control, performs routing lookup & ARP, and hands frames to the **NIC device driver** (DMA) for transmission.
 
 #### IN DETAIL
-Your web app doesn't want to build Ethernet headers, compute IP checksums, or worry about packet retries! The OS provides the **Socket API** (which behaves like opening a file over the network): the app simply calls `connect()` and `send(fd, data)`, and the **OS kernel** handles all the dirty work inside kernel space—buffering bytes, running TCP's 3-way handshake, slicing data into packets, wrapping TCP+IP+MAC headers, and driving the physical Wi-Fi/Ethernet card!
+**Transport-Layer Multiplexing and Demultiplexing** enables thousands of concurrent user-space processes on a single host IP to isolate independent bidirectional byte streams cleanly:
+- **OS Socket Lifecycle**: Server applications open passive listening descriptors (`socket()` $\to$ `bind(80)` $\to$ `listen()`) that block in `accept()` until incoming client SYNs complete handshakes, returning fresh connected socket file descriptors per client while keeping port `80` free for new connections.
+- **4-Tuple Demultiplexing Key**: Unlike UDP (which demultiplexes solely on the **2-tuple** `(Dst IP, Dst Port)`), TCP distinguishes concurrent clients connected to the identical server IP:Port `80` by hashing the complete **4-tuple** **`(Src IP, Src Port, Dst IP, Dst Port)`** inside the kernel TCP hash table—delivering each incoming segment strictly into the matching socket's isolated kernel receive buffer.
 
 ---
 
@@ -356,9 +350,9 @@ Your web app doesn't want to build Ethernet headers, compute IP checksums, or wo
 - **Justification**: A `send()` syscall triggers a **mode switch** (User $\to$ Kernel), *not* necessarily a process context switch. If space is available in the kernel's TCP send buffer, the kernel copies the data and returns immediately to the *same* process. However, on a blocking socket, if the send buffer is full (e.g., receiver `rwnd` = 0 or congestion window full), the OS moves the process to the **Blocked** state and performs a **context switch** to run another ready process.
 
 #### IN DETAIL
-Don't confuse a **Mode Switch** with a **Context Switch**!
-- **Mode Switch**: Calling `send()` flips the CPU Mode Bit from User (`1`) to Kernel (`0`) so the **same process** runs kernel socket code, copies bytes into the kernel's TCP send buffer, and flips back to User (`1`)—**zero context switch** if buffer space exists! (Eliminates **a** and **c**.)
-- **Context Switch**: Only if the TCP send buffer is **completely full** (and the socket isn't non-blocking) does the kernel put the process to sleep (`Blocked`) and switch the CPU to a completely different process (**b**)!
+Tracing a blocking POSIX **`send()` system call** clarifies the crucial operational distinction between synchronous **Mode Switching** and scheduler **Context Switching**:
+- **Kernel Fast Path (Mode Switch Only)**: Invoking `send()` traps CPU execution from User Mode to Kernel Mode (`Ring 3 -> Ring 0`), copies bytes from user buffer into the socket's kernel `sk_buff` TCP send buffer, builds TCP/IP/Ethernet headers, enqueues descriptors onto the NIC DMA TX ring, and returns directly back to User Mode **without invoking the scheduler or context-switching processes** when send-buffer quota remains available.
+- **Full-Buffer Slow Path (Context Switch)**: Only when the kernel send queue saturates (`SO_SNDBUF` full due to downstream congestion/receiver `rwnd = 0`) does the OS kernel mark the calling process `Blocked` on the socket's wait queue and trigger a full **Context Switch** to schedule another runnable process until incoming ACKs free buffer space.
 
 ---
 
@@ -376,12 +370,9 @@ Don't confuse a **Mode Switch** with a **Context Switch**!
 - **Justification**: The standard TCP header has a fixed minimum size of **20 bytes**, and the 32-bit **Acknowledgment Number** field occupies bytes 8–11 in *every* TCP segment (including the initial `SYN`). However, its value is only meaningful when the **ACK control flag bit = 1** (e.g., it is ignored in the very first `SYN` packet where `ACK = 0`).
 
 #### IN DETAIL
-Look at the fixed 20-byte TCP header layout:
-- Bytes 0–3: Source Port + Destination Port
-- Bytes 4–7: Sequence Number
-- **Bytes 8–11: Acknowledgment Number (always physically present!)**
-- Bytes 12–13: Header Length + Control Flags (`URG, ACK, PSH, RST, SYN, FIN`)
-- Why keep the 4-byte ACK slot even in the initial `SYN` packet when there's nothing to acknowledge yet? Keeping a fixed-offset header makes hardware/kernel parsing super fast—you just ignore whatever is in bytes 8–11 whenever the **`ACK` flag bit is `0`**!
+TCP uses a **fixed minimum $20$-byte header layout** where structural field allocations remain invariant across every segment type (`SYN`, `DATA`, `ACK`, `FIN`, `RST`):
+- **Header Flag Semantics**: Bytes `8–11` always reserve a physical **32-bit Acknowledgment Number field** regardless of segment role. Hardware/kernel TCP parsers interpret those 32 bits *if and only if* the **`ACK` control bit (`0x10`)** in the TCP flags byte is set (`1`).
+- **Bootstrap Behavior (`SYN`)**: During the initial client `SYN` segment starting a connection, no peer sequence numbers exist yet—so the client leaves `ACK = 0` inside the control flags (rendering any bytes in offsets `8–11` ignored), setting `ACK = 1` on every subsequent segment (`SYN-ACK` onward) for the remainder of the connection.
 
 ---
 
@@ -405,9 +396,9 @@ Look at the fixed 20-byte TCP header layout:
   Meanwhile, without NAT, **Layer 3 IP addresses** (`192.168.1.10` $\to$ `10.0.0.20`) and **Layer 4 TCP/UDP port numbers** (`5000` $\to$ `6000`) remain unchanged end-to-end across standard IP routing.
 
 #### IN DETAIL
-Think of sending an international courier parcel:
-- The **end-to-end IP addresses and Port numbers** are the permanent sender/recipient address label printed on the inner box (`From: Machine A Port 5000` $\to$ `To: Machine B Port 6000`)—a standard router doesn't touch them!
-- The **MAC addresses** are the local delivery truck tags swapped at every sorting hub (Hop 1: `A's truck` $\to$ `Router LAN dock`; Hop 2: `Router WAN truck` $\to$ `B's dock`). Hence MAC addresses change at **every single hop** (**a**)!
+End-to-end Internet forwarding spans distinct **addressing scopes** across protocol stack layers along multi-hop router paths:
+- **Immutable End-to-End Scope (Layers 3 & 4)**: Absent middlebox NATs/proxies, Transport port numbers (`Src Port, Dst Port`) and Network IP addresses (`Src IP, Dst IP`) encode global origin and ultimate destination across every autonomous transit hop, allowing remote demultiplexing upon final arrival.
+- **Link-Local Rewrite Scope (Layer 2)**: Hardware MAC addresses carry purely **single-link validity** within one broadcast domain. At every Layer-3 router hop, incoming Ethernet/Wi-Fi headers are stripped and regenerated with `Src MAC = Egress Router NIC` and `Dst MAC = Next-Hop Router/Host NIC` while the encapsulated L3/L4 packet header values pass untouched.
 
 ---
 
@@ -432,13 +423,9 @@ The destination validates the incoming stream `11100110011001101101010101010101`
 3. **Link-Layer CRC (FCS)**: Underneath IP/TCP, Ethernet hardware also checks a 32-bit **CRC** frame trailer to reject physical bit errors.
 
 #### IN DETAIL
-Let's verify that binary checksum calculation step-by-step so it's crystal clear in an exam:
-- Given 32 bits: `11100110 01100110` + `11010101 01010101`
-  - Add bit-by-bit from right to left:
-    `1110011001100110` (`0xE666`) + `1101010101010101` (`0xD555`) = `1 1011101110111011` (`0x1BBBB`)
-  - Notice the overflow carry bit `1` on the far left! In **1's complement arithmetic**, you wrap that carry bit back around and add `+1` to the bottom: `1011101110111011 + 1 = 1011101110111100` (`0xBBBC`).
-  - Flip every bit (`~0xBBBC`) $\to$ `0100010001000011` (`0x4443`)!
-- When the receiver gets both data words AND the checksum word `0x4443`, it adds all three: `0xBBBC + 0x4443 = 0xFFFF` (all `1`s)! If even a single bit flipped on the wire, the sum won't be all `1`s, so TCP catches the corruption immediately!
+The **16-bit Internet Checksum** protects Transport headers, payloads, and IP addressing alignment simultaneously using computationally cheap one's-complement arithmetic:
+- **One's-Complement Addition & End-Around Carry**: Partitioning segments (plus a synthetic L3 **pseudo-header** embedding `Src IP, Dst IP, Protocol, TCP Length`) into sequential 16-bit words and summing with **end-around carry wrapping** (`carry out + 1` back into bit 0) ensures **endian-independence** and detects all single-bit flips plus misaligned routing corruptions.
+- **Complementary Verification Rule**: Transmitters store the **bitwise one's complement (`~Sum`)** into the checksum field; receivers sum *all* 16-bit words including the received checksum field directly—valid frames always yield all-ones **`0xFFFF`** (`-0` in one's complement), rejecting altered packets immediately without expensive finite-field division.
 
 ---
 
@@ -456,9 +443,9 @@ Let's verify that binary checksum calculation step-by-step so it's crystal clear
    - Sender restricts unacknowledged bytes in flight (`LastByteSent - LastByteAcked <= rwnd`), pausing if `rwnd == 0` until buffer space frees up.
 
 #### IN DETAIL
-Notice the clear division of responsibility:
-- **Reliability** asks: *"What if the network drops, duplicates, or scrambles a packet?"* Answer: Number every byte (**Sequence Numbers**), demand receipts (**ACKs**), inspect for damage (**Checksums**), and resend if the receipt doesn't arrive before the **Timeout**!
-- **Flow Control** asks: *"What if a super-fast 10 Gbps server blasts data at a slow smartphone whose RAM buffer is full?"* Answer: The smartphone stamps a **`rwnd` (Receive Window)** number on every ACK saying *"I only have 4 KB of empty buffer left—don't send more than 4 KB until I drain it!"*
+TCP couples **byte-stream Reliability (ARQ)** and **buffer-preserving Flow Control (`rwnd`)** orthogonally inside every segment acknowledgment:
+- **Reliability Engine (Loss, Corruption, Reordering)**: Every payload byte carries a 32-bit cumulative sequence coordinate. The receiver drops corrupted segments failing the 16-bit checksum, buffers out-of-order arrivals (`SR`-like behavior), and emits cumulative **`ACK`** numbers (`Next Expected Byte`). Sender timers (**RTO**) and **Fast Retransmit (`3 Duplicate ACKs`)** repair dropped segments cleanly.
+- **Receiver-Driven Flow Control (`rwnd`)**: Unlike congestion control (`cwnd` protecting intermediate routers), TCP prevents fast senders from overflowing a slow receiver's kernel `SO_RCVBUF` memory by advertising remaining free socket buffer space (`rwnd = RcvBuffer - BufferedUnreadBytes`) explicitly inside every ACK header (`Window Size` field), bounding sender flight strictly by $\text{LastByteSent} - \text{LastByteAcked} \le \text{rwnd}$.
 
 ---
 
@@ -478,9 +465,9 @@ Notice the clear division of responsibility:
    - To achieve high throughput without stalling while waiting for end-to-end ACKs, the sender must keep $\text{BDP} = \text{Bandwidth} \times \text{RTT}$ bytes unacknowledged in flight simultaneously. Since transport RTT is vastly larger than single-link RTT, the transport layer requires a **much larger sliding window** (and larger host buffers).
 
 #### IN DETAIL
-Think of pouring water into a garden hose vs. a 10-kilometer cross-city pipeline:
-- **Data Link Layer** is a 2-meter garden hose between two directly wired neighbors. Water reaches the other end almost instantly, so you only need a small cup of water in transit at once (small sliding window).
-- **Transport Layer (TCP)** is a 10,000-km Internet path passing through 15 routers from Hyderabad to New York ($\text{RTT} \approx 200\text{ ms}$). On a 1 Gbps link, during the 200 ms you wait for the first ACK to return, you can pump $10^9 \times 0.2 / 8 = \mathbf{25\text{ MB}}$ of data into the pipe! If your sliding window were tiny (like a data-link window of 8 packets), the sender would finish 8 packets in microseconds and sit idle 99.9% of the time waiting on ACKs!
+Optimum pipeline window sizing scales linearly with each layer's **Bandwidth-Delay Product ($\text{BDP} = B \times \text{RTT}$)**—explaining orders-of-magnitude differences between Link Layer and Transport Layer windows:
+- **Single-Hop Data Link Scope**: Link frames traverse a single adjacent physical wire/fiber (`RTT` $\approx \mu$s on LANs), yielding tiny BDP values where small sliding windows (`4–32` frames) already saturate wire capacity.
+- **End-to-End Multi-Hop Transport Scope**: Transport segments cross dozens of continental/intercontinental routers and queued paths (`RTT` $\approx 50\text{--}300\text{ ms}$) across gigabit/terabit links, creating massive in-flight BDPs ($10\text{ Gbps} \times 100\text{ ms} = 125\text{ MB}$ $\implies > 80,000$ segments!). Maintaining $100\%$ pipe utilization without stalling idle waiting for ACKs mandates large sliding windows (`64 KB` base + RFC 1323 **Window Scaling** shifts up to **$1\text{ GB}$**).
 
 ---
 
@@ -498,9 +485,9 @@ Think of pouring water into a garden hose vs. a 10-kilometer cross-city pipeline
   - **d. ($N_q = N_p + 1$)**: Because the `SYN` flag itself consumes **1 byte of sequence space**, $Q$ acknowledges receipt of $P$'s `SYN` by setting the acknowledgment number to the *next expected byte*: $N_q = N_p + 1$.
 
 #### IN DETAIL
-Notice that the exam instructions explicitly state *"you can select one or more options (if necessary)"*!
-1. Why **not `b` (set to 0)**? If every TCP connection started at `seq = 0`, an attacker could easily forge packets—and worse, a delayed packet #5 from an old crashed session could crash straight into a brand-new session! So TCP picks a pseudo-random 32-bit Initial Sequence Number ($N_p$). *(Note: Wireshark only shows `Seq = 0` as a "relative sequence number" helper for readability—on the real wire, it's random!)*
-2. Why **`d` ($N_q = N_p + 1$)**? Even though a `SYN` packet carries 0 application payload bytes, TCP treats the `SYN` control bit as occupying **1 logical sequence number** so that `SYN` itself can be reliably acknowledged (`N_p + 1`).
+Diagnosing **TCP Three-Way Handshake** trace parameters verifies protection against **stale delayed segments** and **blind spoofing attacks**:
+- **Randomized Initial Sequence Numbers (`ISN`)**: Choosing fixed `ISN = 0` invites both **cross-incarnation wrap/replay collisions** (old delayed segments from a prior closed port reuse matching sequence space of a fresh session) and trivial **blind sequence-prediction / session-hijacking attacks** where off-path attackers forge `SYN/ACK/RST` segments. Standard RFC 6528 hashes clock ticks with secret per-connection cryptographic keys (`N_p` pseudo-random).
+- **Exact Byte-Consumption Accounting (`N_q = N_p + 1`)**: Although a pure **`SYN`** (and `FIN`) segment carries zero application payload bytes, TCP intentionally assigns **1 sequence-number coordinate** to the `SYN` flag bit itself so the peer can unambiguously acknowledge receipt of `SYN` via `ack = N_p + 1` (preventing ambiguous zero-progress `SYN` retransmissions).
 
 ---
 
@@ -531,15 +518,9 @@ Notice that the exam instructions explicitly state *"you can select one or more 
 - **Solution**: **Independent Half-Close (`FIN` + `ACK` in each direction) + Retransmission Timers + `TIME_WAIT` ($2\text{MSL}$)** so delayed segments drain and a lost final `ACK` can be re-sent safely.
 
 #### IN DETAIL
-Imagine a malicious or slow postal system where letters can get stuck in a mailbag for **2 minutes** and show up late!
-- **Why 2 steps (`Connect` $\to$ `Accepted`) fails catastrophically**: Suppose Alice ordered a pizza (`Connect` + `Charge $50`) an hour ago, got her pizza, and hung up. A delayed duplicate of that envelope shows up at the pizza shop now! In a 2-way handshake, the shop thinks it's a brand-new order, bakes a phantom pizza, and charges Alice $50 again!
-- **How the 3-Way Handshake fixes it**: Now, when an envelope `"Connect (ID = x)"` arrives, the shop does NOT bake the pizza yet! Instead, the shop replies: *"Did you really just ask for ID=x? Prove you're alive right now by echoing back my secret fresh number y!"*
-  - If it was a **ghost delayed packet**, Alice says *"Huh? I didn't order anything!"* (sends `RST` or ignores it)—so the shop safely drops the ghost request!
-  - Only a **live, real Alice** replies *"Yes, confirmed y!"* (Step 3), proving both sides are alive *right now* and synchronized on both directions' sequence numbers!
-
-**And Closing Safely (`Two-Army Problem`)**:
-(Two-Army Problem)**: Imagine two Blue armies trying to agree via messengers through enemy territory when to both hang up! Army 1 sends *"Let's hang up!"* Army 2 replies *"Agreed!"*—wait, how does Army 2 know Army 1 heard *"Agreed"*?! If Army 1 sends *"I heard your agreement!"*, how does Army 1 know *that* arrived? **Mathematically unsolvable with 100% perfection!**
-  So TCP compromises brilliantly: **close each direction separately (`FIN` / `ACK`)**, retry with a **timeout** if a `FIN` is lost (closing forcefully after $N$ retries), and wait **`2 * MSL` (`TIME_WAIT`)** so any stray packets die off cleanly!
+TCP connection lifecycle design resolves two fundamental distributed-systems pitfalls across unreliable networks: **delayed duplicate replays (`Establishment`)** and the **Two-Army asymmetric halting impossibility (`Release`)**:
+- **Three-Way Handshake & Delayed Duplicates**: Under naive two-way handshakes (`SYN -> ACK`), an obsolete delayed duplicate `SYN` arriving late opens a half-open ghost connection allocating server resources. With a **3-Way Handshake**, the server's `SYN(N_s) + ACK(N_c + 1)` forces client confirmation of `N_s + 1`; if the `SYN` was a ghost duplicate, the genuine client rejects the unrecognized `N_s + 1` with **`RST`** immediately, closing the ghost state cleanly.
+- **Connection Release (`4-Way FIN` + `2 MSL TIME_WAIT`)**: Proving bidirectional agreement via finite unreliable messages hits the unsolvable **Two-Army Problem** (any final `ACK` could drop leaving the sender unsure whether its peer heard it, requiring infinite ACKs of ACKs). TCP settles pragmatically using four independent half-closes (`FIN`/`ACK` per direction) paired with a **`2 × MSL` (`TIME_WAIT`)** hold state on the active closer—retransmitting lost final ACKs if duplicate `FIN`s re-arrive while allowing stale network segments to drain completely before port reuse.
 
 ---
 
@@ -568,8 +549,9 @@ Imagine a malicious or slow postal system where letters can get stuck in a mailb
      $$\text{TimeoutInterval} = 51.25 + 4 \times 5.1875 = 51.25 + 20.75 = \mathbf{72.00\text{ ms}}$$
 
 #### IN DETAIL
-Why does TCP add **`4 * DevRTT`** onto `EstimatedRTT` instead of just using `EstimatedRTT` (`51.25 ms`, which is distractor `c`)?
-Because network latency has **jitter**! Even if average RTT is `51.25 ms`, half of healthy packets naturally take a bit longer than the average. Adding a **4-standard-deviation safety margin (`4 * DevRTT`)** prevents TCP from triggering false timeouts when a normal packet merely experiences slight jitter! *(Also note: always compute `DevRTT` using the **newly updated** `EstimatedRTT = 51.25`, giving exactly `72.00 ms` = option **b**.)*
+Adaptive TCP **Retransmission Timeout ($\text{RTO}$)** uses Exponentially Weighted Moving Averages (**EWMA**) of *both* mean latency and statistical variance to minimize false retransmissions without waiting sluggishly on real losses:
+- **Tracking Jitter Beyond Mean Latency**: Setting $\text{RTO} = \text{EstimatedRTT}$ alone causes **~50% spurious retransmissions** whenever normal round-trip times fluctuate symmetrically above average. Jacobson/Karels introduced **`DevRTT`** (smoothed $|\text{SampleRTT} - \text{EstimatedRTT}|$ with $\beta = 0.25$) and set **$\text{RTO} = \text{EstimatedRTT} + 4 \cdot \text{DevRTT}$**—giving a wide statistical safety margin during volatile queuing spikes while tightening swiftly on stable fiber paths (`72.00 ms` here).
+- **Karn's Algorithm Exclusion**: Retransmitted segments introduce ambiguity (did the returning ACK reply to the original or retried copy?); TCP excludes retransmitted RTT samples from EWMA updates and **doubles $\text{RTO}$ exponentially** upon consecutive timeouts to avoid congestion collapse.
 
 ---
 
@@ -592,15 +574,9 @@ Because network latency has **jitter**! Even if average RTT is `51.25 ms`, half 
   3. **Convergence to Fairness & Efficiency**: Because Multiplicative Decrease shrinks larger flows by a *larger absolute amount* than smaller flows while Additive Increase adds the *same amount* to both, repeated cycles geometrically drive unequal flows along a sawtooth path **straight onto the fair and efficient operating point ($x_1 = x_2$, $x_1 + x_2 = C$)**—which is why TCP uses AIMD.
 
 #### IN DETAIL
-Imagine two drivers ($F_1$ and $F_2$) sharing a highway whose capacity is $C = 100\text{ Mbps}$, starting unfairly: $F_1$ is taking $80\text{ Mbps}$ and $F_2$ is taking only $10\text{ Mbps}$. Neither knows the other's speed—they only get a traffic light saying **Green (keep going faster)** or **Red (too crowded, slow down!)**:
-- **If both add/subtract equally (AIAD)**: On Green both add $+10$, on Red both subtract $-10$. Their *difference* ($80 - 10 = 70$) stays $70$ forever—$F_2$ stays permanently cheated!
-- **If both multiply/divide equally (MIMD)**: Both keep the exact same *ratio* ($8:1$) forever—still unfair!
-- **Now watch AIMD**:
-  - Green: Both add $+5$: $(85, 15) \to (90, 20)$ [Red! Total $110 > 100$].
-  - Red: Both **cut in half** ($\div 2$): $(45, 10)$! Look! $F_1$ dropped by $45$, $F_2$ dropped by only $5$—their gap shrank from $70$ to **$35$**!
-  - Repeat a few cycles: $(45,10) \to (67.5, 32.5) \to (33.75, 16.25) \to \dots \to (50, 50)$!
-
-That simple rule—**probe gently up (+1), back off sharply down ($\div 2$)**—automatically forces *every* competing TCP connection on the Internet to converge to an **equal, efficient share** without a central coordinator!
+Distributed **End-to-End Congestion Control** forces millions of mutually unaware hosts sharing arbitrary bottleneck queues to converge automatically on both **stability** and **fair efficiency** without explicit centralized router rate coordination:
+- **Why Multiplicative-Increase Fails**: In **AIMD**, senders probe spare bandwidth linearly (**Additive Increase: $+1\text{ MSS/RTT}$**) until bottleneck buffers overflow (signaled via drop or ECN), then cut sending rate geometrically (**Multiplicative Decrease: $\times 0.5$**).
+- **Geometric Fairness Proof (Chiu–Jain Vector Analysis)**: Plot flows $(x_1, x_2)$ against total capacity line $x_1 + x_2 = C$ and equal-share fairness ray $x_1 = x_2$. Whenever $x_1 > x_2$ exceeds capacity, **Multiplicative Decrease** scales both along a line *toward the origin* (reducing absolute imbalance $|x_1 - x_2|$ by half), whereas **Additive Increase** shifts parallel to the $45^\circ$ fair ray (preserving constant gap while climbing back to $C$)—zigzagging deterministically toward the Pareto-fair equilibrium $x_1 = x_2 = C/2$ regardless of skewed initial rates.
 
 ---
 
@@ -624,9 +600,9 @@ That simple rule—**probe gently up (+1), back off sharply down ($\div 2$)**—
      - *TCP Reno (Fast Recovery)*: Immediately retransmits the missing segment without waiting for timeout, sets `ssthresh = cwnd / 2`, sets **`cwnd = ssthresh` (plus `3 MSS`)**, and resumes **Congestion Avoidance**—producing the classic AIMD sawtooth without collapsing to `1 MSS`.
 
 #### IN DETAIL
-Look at why **TCP Reno** beats **TCP Tahoe** on modern networks:
-- When an **RTO timeout** explodes, zero ACKs are coming back—the network pipe is severely choked, so slamming the brakes all the way to **`cwnd = 1`** is necessary.
-- When **3 Duplicate ACKs** arrive, notice what that actually means: three *later* packets just made it safely to the receiver! The network isn't dead—only 1 packet dropped! Cutting `cwnd` in **half** (**Fast Recovery**) keeps the pipe half-full instead of needlessly dropping back to `1 MSS`!
+Modern TCP (**Tahoe vs. Reno**) integrates **exponential startup**, **linear probing**, and **loss-severity differentiation** to match path BDP without inducing prolonged queue collapse:
+- **Slow Start (`cwnd < ssthresh`)**: Doubles `cwnd` every RTT ($+1\text{ MSS}$ per ACK) solely to rapidly ramp from $1\text{ MSS}$ up to the bottleneck's bandwidth-delay boundary (**$2^k$ RTTs**), bounded by `ssthresh` (initially high or half of pre-loss `cwnd`).
+- **Mild vs. Severe Congestion (`Fast Recovery` in Reno vs. Tahoe)**: When isolated segments drop mid-stream, subsequent out-of-order arrivals produce **3 Duplicate ACKs**, confirming packets are still trickling out of the bottleneck pipe! Instead of resetting all the way down to $1\text{ MSS}$ (**Tahoe**), **TCP Reno** executes **Fast Retransmit**, halves `ssthresh = cwnd/2`, drops `cwnd` only to `ssthresh` (**Fast Recovery**), and resumes linear **AIMD**—reserving full `cwnd = 1` Slow Start resets strictly for complete silent blackouts (**RTO Timeout**).
 
 ---
 
@@ -644,9 +620,9 @@ Look at why **TCP Reno** beats **TCP Tahoe** on modern networks:
    - **Importance**: QoS guarantees cannot be met if infinite flows are allowed onto finite resources. Admission control checks whether sufficient bandwidth/router/CPU capacity exists **before** admitting a new flow or virtual circuit; if accepting it would cause congestion and break existing guarantees, the new request is rejected (e.g., busy signal in telephony), protecting active sessions.
 
 #### IN DETAIL
-Think of **QoS** as promising *"Your ambulance will reach the hospital in under 5 minutes"* or *"Your Zoom video won't stutter."* Simply adding extra capacity everywhere ("overprovisioning") is too expensive, so routers/OSes reserve queues and schedule packets carefully to meet guarantees.
-
-**Admission Control** is the bouncer at the club door: if the fire capacity is 100 people and 100 people are already inside enjoying the show, letting another 50 people cram in ruins the experience for *everyone*! By saying *"Sorry, full right now"* to the 101st request, the system guarantees that all 100 admitted flows actually receive their promised QoS.
+**Quality of Service (QoS)** and **Admission Control** bridge the gap between **aggregate best-effort capacity** and **per-flow deterministic service guarantees (bounded delay, jitter, loss, minimum rate)** required by real-time interactive applications:
+- **Limitations of Overprovisioning Alone**: Simply adding best-effort link bandwidth lowers average delay under typical conditions, yet unconstrained bursty background TCP transfers (which expand `cwnd` until queues overflow) still trigger transient head-of-line queuing spikes and packet jitter violating VoIP/control bounds ($<150\text{ ms}$).
+- **Admission Control Conservation Invariant**: Weighted Fair Queuing and priority queues can only maintain rate/latency SLAs while total committed bandwidth across active flows remains strictly below physical link capacity ($\sum R_i \le C$). Admission control enforces a **signup contract check (`RSVP`/broker)** before admitting new reserved streams—rejecting or downgrading excess flows cleanly instead of degrading all existing active SLAs simultaneously.
 
 ---
 
@@ -668,10 +644,10 @@ Think of **QoS** as promising *"Your ambulance will reach the hospital in under 
     - Reserve dedicated ring buffers / frame pools to smooth out disk/network jitter.
 
 #### IN DETAIL
-Watching a movie or having a video call fails completely if frames arrive 2 seconds late or freeze for a page fault—even if the "average" speed over an hour looks fine! To prevent glitches, *every* OS subsystem must cooperate:
-1. **CPU (Process Scheduler)** can't let a background compiler run for 500 ms and make audio stutter; it uses deadline-based real-time scheduling (**EDF / RMS**) and CPU reservations.
-2. **Disk (Disk Scheduler)** can't use pure FCFS or pure SCAN that starves an urgent video frame at the edge of the platter; **SCAN-EDF** hits urgent deadlines first while ordering nearby tracks efficiently.
-3. **RAM (Memory Manager)** can't swap out your active audio/video buffer during playback! Pinning real-time memory pages eliminates sudden multi-millisecond page-fault pauses.
+Sustaining jitter-free **real-time multimedia playback** demands coordinated QoS scheduling across *every* local OS bottleneck layer rather than the network NIC alone:
+- **Process/CPU Scheduling**: Unbounded time-sharing quanta stall video decoding; **EDF (Earliest Deadline First)** or **Rate Monotonic Scheduling (RMS)** with **Admission Control** ($\sum \frac{C_i}{T_i} \le 1$ / Liu–Layland bound) guarantees periodic frame decode deadlines deterministically.
+- **Disk Scheduling**: Traditional LBA-minimizing `SCAN/SSTF` can starve real-time media buffers across arbitrary seeks; **EDF-SCAN** and periodic **contiguous/rate-guaranteed streaming blocks** guarantee buffer refill deadlines ahead of disk starvation.
+- **Memory Management**: Page faults stall playback unpredictably for milliseconds; **`mlock()` frame pinning** locks active codec buffers and real-time threads in resident DRAM immune from global page eviction.
 
 ---
 
@@ -690,10 +666,9 @@ Diverse applications have conflicting QoS needs (e.g., interactive/VoIP needs lo
 - **Fix**: Per-flow queuing schemes like **Fair Queuing / Weighted Fair Queuing (WFQ)** isolate flows and allocate bandwidth/priority fairly.
 
 #### IN DETAIL
-If an airport puts **ambulance medevac passengers**, **business travelers**, and **10,000 crates of bricks** into the *exact same single-file security line* (FIFO):
-- Whenever a truck dumps 1,000 brick crates onto the belt, every passenger behind it gets delayed unpredictably!
-- Worse, if a rude shipper keeps shoving bricks faster than the scanner runs, the waiting hall overflows and incoming emergency passengers get turned away at the door!
-Diverse applications need **separation and scheduling fairness** (like WFQ or priority queues), not a blind one-size-fits-all FIFO line.
+First-In, First-Out (**FIFO**) router queuing enforces a single blind arrival-order queue, coupling heterogeneous traffic classes directly into mutual interference (**Head-of-Line Blocking**):
+- **Latency & Jitter Coupling**: When a bulk TCP transfer injects a sudden $100$-packet burst of MTU-sized ($1500\text{ B}$) frames ahead of small low-rate VoIP audio packets ($60\text{ B}$), tiny latency-critical frames stall for tens of milliseconds waiting behind bulk transmission delays—inducing choppy jitter regardless of low VoIP bitrates.
+- **Zero Per-Flow Isolation**: FIFO applies **tail-drop uniformly** upon queue saturation without differentiating senders; greedy non-responsive UDP flows flood the buffer and drop well-behaved TCP flows indiscriminately, violating both proportional fairness and delay isolation.
 
 ---
 
@@ -713,14 +688,9 @@ Diverse applications need **separation and scheduling fairness** (like WFQ or pr
    - **Practical Implementation via Virtual Finishing Time**: Since real routers cannot interleave individual bytes of different packets on one wire, the router computes each arriving packet's **virtual finishing time $F_i$** (the round number when its last byte would finish draining in the ideal bit-by-bit system) and always transmits the packet with the **smallest finishing time** next—guaranteeing exact fair bandwidth sharing regardless of packet size!
 
 #### IN DETAIL
-Imagine two flows sharing a 10 Mbps router:
-- **Flow A** sends tiny **100-byte** gaming packets.
-- **Flow B** sends giant **1500-byte** video-backup packets.
-If a router just takes turns sending *"1 packet from A, then 1 packet from B"*, Flow B steals **1500 bytes** every turn while Flow A only gets **100 bytes**—so Flow B grabs **93.75%** of the link's bandwidth!! Totally unfair!
-
-**Bit-by-bit Fair Queuing / WFQ** fixes this brilliantly:
-- Imagine an ideal magical server taking **1 byte from A, 1 byte from B** simultaneously: Flow A's tiny 100-byte packet finishes at **Round 100**, whereas Flow B's huge 1500-byte packet doesn't finish until **Round 1500**!
-- Because a real router has to transmit whole packets cleanly, it simply tags every incoming packet with its **simulated finishing round** (`100` vs `1500`) and transmits the packet with the earliest finishing time first! Result: **small packets zip right out with low delay, and every flow receives its exact fair share of bytes/second!**
+Naive **Packet-by-Packet Round-Robin Fair Queuing (FQ)** isolates separate flows into per-flow queues yet still breaks true **bandwidth fairness** whenever flow packet sizes differ systematically:
+- **Packet-Size Skew Exploit**: Rotating strictly `1 packet per queue per turn` grants a flow emitting $1500\text{-byte}$ bulk video frames **$15\times$ more bits per second** than a competing flow emitting $100\text{-byte}$ gaming/control packets under equal turn frequency!
+- **Byte-Level Fluid Emulation (GPS $\to$ WFQ)**: Ideal **Generalized Processor Sharing (GPS)** drains every active flow queue continuously at bit-level granularity proportional to weights $w_i$. **Weighted Fair Queuing (WFQ)** approximates GPS cleanly for discrete atomic packets by stamping each arriving packet with its theoretical GPS **virtual finish time** ($F_i^k = \max(F_i^{k-1}, V(t_{\text{arr}})) + L_i^k / w_i$) and serving the packet with the smallest virtual finish time next—restoring exact bit-rate proportionality regardless of asymmetric packet sizes.
 
 ---
 
@@ -752,9 +722,9 @@ If a router just takes turns sending *"1 packet from A, then 1 packet from B"*, 
    - **Final Schedule**: $P_{3,1} \to P_{1,1} \to P_{2,1} \to P_{3,2}$ *(Flow 3 transmitted 200 B while Flows 1 & 2 each sent 100 B)*.
 
 #### IN DETAIL
-Why calculate $L_i^k / w_i$?
-- Under an imaginary bit-by-bit fluid pump, Flow 3's pipe is **$2\times$ wider** ($w_3 = 2$), so draining a 100-byte packet takes only **50 virtual seconds** instead of **100**!
-- Therefore, WFQ schedules whichever packet would *finish earliest* in that ideal fluid system (`F = 50` beats `100`!). And notice how $P_{3,2}$ starts at `50` (not `0`!) because Flow 3 has to finish `P_{3,1}` before starting `P_{3,2}`, ending at `100`—delivering exact `2 : 1 : 1` weighted fairness across variable packet sizes!
+**Weighted Fair Queuing (WFQ)** translates the unimplementable continuous-bit **Generalized Processor Sharing (GPS)** fluid model into exact discrete packet dispatch scheduling:
+- **GPS Bandwidth Guarantee**: When active backlog set $B(t)$ shares physical link rate $C$, each flow $i \in B(t)$ receives deterministic instantaneous throughput $R_i(t) = \frac{w_i}{\sum_{j \in B(t)} w_j} C$, ensuring a minimum committed rate even under adversarial flooding by peers and redistributing unused capacity work-conservatively.
+- **Virtual Time Scheduling Invariant**: Computing finish tags $F_i^k = \max(F_i^{k-1}, V(a_i^k)) + L_i^k / w_i$ tracks normalized cumulative service per flow. Larger weights $w_i$ shrink the denominator $L_i^k / w_i$, assigning smaller finish tags to higher-weight flows so they transmit proportionally more bytes per virtual round while preventing tiny-packet starvation or giant-packet monopolization.
 
 ---
 
@@ -775,9 +745,9 @@ Why calculate $L_i^k / w_i$?
   3. **Inability to Enforce SLAs / QoS**: Without traffic policing/shaping at the edge, greedy hosts inject traffic spikes that violate contracted traffic profiles and break QoS guarantees for well-behaved flows.
 
 #### IN DETAIL
-Think of pouring water rapidly out of a huge pitcher (**bursty computer traffic**—a user clicks a webpage and dumps 50 packets in 1 millisecond) into a narrow kitchen drain (**router link**):
-- **Without a Leaky Bucket**: If you dump all 50 packets straight into the network at 10 Gbps when the bottleneck router downstream can only handle 100 Mbps, the downstream router's buffer overflows immediately, drops half your packets, and forces retransmissions!
-- **With a Leaky Bucket**: You pour your burst into a **bucket** (buffer of size $B$) that has a fixed-width spout at the bottom leaking out cleanly at **100 Mbps**. The downstream network sees a smooth, predictable, steady trickle—virtually eliminating burst-induced congestion! *(And if a rogue sender tries to pour faster than the bucket holds, excess overflows right at the edge before hurting the rest of the network!)*
+The **Leaky Bucket** algorithm enforces strict **deterministic output-rate shaping** on irregular bursty source traffic entering core routers or traffic policers:
+- **Finite-Queue Constant-Rate Drain**: Incoming bursts buffer inside a finite capacity-$B$ FIFO queue drained strictly at fixed constant leak rate $\rho\text{ bytes/s}$ regardless of arrival spikes—eliminating microburst clustering downstream. Packets arriving when queue occupancy reaches $B$ are discarded (**tail-drop shaping**).
+- **Consequences of Omitting Shaping**: Unregulated host/application bursts enter downstream switches unpaced, simultaneously saturating shared bottleneck buffers, triggering massive multi-flow tail-drops, oscillating TCP global synchronization, and violating ISP peak-rate SLA contracts.
 
 ---
 
@@ -796,10 +766,9 @@ Think of pouring water rapidly out of a huge pitcher (**bursty computer traffic*
 - **Justification**: The leaky bucket enforces a rigid constant output rate even when the host was previously idle, unnecessarily delaying bursty transmissions. In contrast, the token bucket saves unused tokens during idle periods and lets bursts pass at peak rate up to bucket capacity—adapting smoothly to realistic bursty traffic while still bounding the average rate.
 
 #### IN DETAIL
-Compare two phone data plans:
-- **Leaky Bucket**: You're strictly capped at **1 MB every single second**, even if you haven't used the Internet for an entire hour! When you suddenly click a webpage needing a 5 MB burst, it throttles you painfully slow!
-- **Token Bucket**: You save up unused allowance (**tokens**) while idle—so when you click a webpage, you can immediately burst at full speed using your saved tokens, while still preventing sustained overload over the long run!
-
-*(Note: Question 2.4 is missing between pages 3 and 4 of the repository scan.)*
+Comparing **Leaky Bucket** and **Token Bucket** shaping highlights a vital architectural distinction between **strict rate smoothing** and **burst-tolerant average rate enforcement**:
+- **Leaky Bucket Rigidity**: Caps peak transmission rate unconditionally at constant leak rate $\rho$ forever—forbidding a host from sending a legitimate fast burst even after sitting completely idle for minutes, adding artificial queuing latency to naturally bursty interactive web/RPC traffic.
+- **Token Bucket Flexibility**: Accumulates tokens at average long-term rate $r$ up to burst bucket capacity $b$. While maintaining the identical long-term rate limit ($\text{bytes}(t) \le r \cdot t + b$), accumulated idle credits permit immediate **wire-speed microburst emission** up to $b$ bytes without queuing delay (and can be cascaded in series with a peak-rate Leaky Bucket in **Policing/TSpec** architectures to enforce both sustainable rate and finite peak ceilings).
 
 ---
+

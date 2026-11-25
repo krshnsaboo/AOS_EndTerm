@@ -39,9 +39,9 @@ From Dijkstra's recollections (`EWD1303`), three core motivations led to introdu
 3. **Solving the Mutual Exclusion / Critical Section Problem**: To allow cyclic concurrent processes sharing common memory to enter critical sections safely (at most one at a time, without timing assumptions or race conditions), clean explicit synchronization primitives were required.
 
 #### IN DETAIL
-In his handwritten notes (`EWD1303.pdf`), Dijkstra shares two delightful stories about why he invented semaphores (`P` = *proberen* / wait, `V` = *verhogen* / signal):
-1. **The CPU vs. Typewriter Symmetry**: On early computers, he inserted a small output buffer between the fast CPU and a slow 100 ms electric typewriter. Suddenly he realized their relationship was completely symmetric: the CPU had to pause if the buffer was *full*, and the typewriter had to pause if the buffer was *empty*! That single insight birthed binary semaphores (and his colleague Carel Scholten suggested generalizing them to counting integers for multi-slot buffers!).
-2. **Stopping Busy Waiting & Fixing Critical Sections**: In a multiprogramming system, spinning in a `while(busy)` loop wastes precious CPU time. By using `P()` and `V()`, a waiting process tells the scheduler *"I am blocked—give the CPU to someone else!"*, while simultaneously solving mutual exclusion cleanly without relying on fragile hardware speed assumptions.
+In `EWD1303`, Dijkstra recounted two foundational constraints behind inventing **Semaphores (`P`/`wait` and `V`/`signal`)**:
+- **CPU–Peripheral Speed Asymmetry & Symmetric Producer–Consumer Synchronization**: Interposing a bounded memory buffer between a high-speed processor and a slow asynchronous electric typewriter revealed exact producer–consumer symmetry—neither agent should overwrite a full slot nor read an empty slot. Dijkstra initially created binary semaphores (`0`/`1`), which Carel Scholten generalized to non-negative counting integers tracking buffer occupancy cleanly.
+- **Eliminating Busy-Waiting Power/Cycle Waste**: Hardware test-and-set loops burn full CPU bandwidth waiting on asynchronous events. Defining `P()` to transition a waiting thread into kernel `Blocked` state until `V()` awakens it reconciled critical-section mutual exclusion with efficient multiprogramming CPU sharing.
 
 ---
 
@@ -58,9 +58,8 @@ If a critical-section solution violates **Progress**, the following severe issue
 2. **Stalled System Throughput & Livelock**: Processes outside the critical section (doing unrelated remainder-section work or terminated) can block eligible processes from entering, causing system freeze/deadlock despite available resources.
 
 #### IN DETAIL
-Think of **Strict Alternation** (`turn = 0` gives turn to P0, `turn = 1` gives turn to P1):
-- Mutual exclusion holds 100%.
-- **Progress FAILS!** Suppose P0 finishes, sets `turn = 1`, and goes home for vacation (stays in its remainder section). Now P1 enters, finishes, sets `turn = 0`, and immediately needs to enter the critical section again. Because `turn == 0` and P0 isn't even running, **P1 sits locked outside an empty room forever!** That's what violating **Progress** looks like: *empty critical section, ready processes outside, yet nobody can enter!*
+Among the three canonical requirements for a valid Critical Section solution (**Mutual Exclusion**, **Progress**, and **Bounded Waiting**), violating **Progress** cripples liveness even when safety holds:
+- **Strict Alternation Failure Mode**: Consider Peterson/Dekker-style naive alternation (`while (turn != i);`), which guarantees mutual exclusion ($\le 1$ process inside CS). If `turn == 0` while $P_0$ remains indefinitely outside its CS (e.g., idle in its remainder section or terminated), $P_1$ is permanently prevented from entering an *unoccupied* critical section—a direct **livelock / progress failure** driven by coupling entry rights to a non-contending process.
 
 ---
 
@@ -79,9 +78,9 @@ Think of **Strict Alternation** (`turn = 0` gives turn to P0, `turn = 1` gives t
   3. **Power Waste & Bus Contention**: Increases energy/heat consumption and generates heavy cache-coherence bus traffic on multicore systems.
 
 #### IN DETAIL
-Imagine sitting in a parked car staring at a red traffic light with your foot floored on the gas pedal in neutral! That's **busy waiting** (`while (TestAndSet(&lock));`): the CPU is running at 100% speed doing zero forward movement!
-- On a **1-core CPU**, it's catastrophic if the lock holder gets preempted—the spinner burns the entire time slice just yelling *"Is it unlocked yet?!"*
-- On a **multicore CPU**, spinlocks are *only* justified for ultra-short critical sections (shorter than 2 context switches!) where waiting via OS blocking (`sleep`/`wakeup`) would cost *more* time than spinning briefly.
+**Busy waiting (spinlocking)** continuously consumes CPU instruction cycles polling a shared flag (`while (TestAndSet(&lock));`) rather than releasing the processor via the kernel scheduler:
+- **Uniprocessor Hazard**: On a single CPU core, if a low-priority thread holds `lock` and gets preempted by a higher-priority spinner, the spinner hogs 100% of remaining CPU quanta polling `lock`, preventing the lock holder from ever resuming to unlock—causing **priority inversion deadlock**.
+- **Multicore Trade-off**: Spinlocks remain beneficial only on **SMP/multicore systems** when the lock holder is concurrently executing on a separate core and critical-section hold duration $T_{\text{hold}}$ is strictly shorter than two context switches ($2 \cdot T_{\text{ctx}}$); beyond that threshold, cache-line bouncing over the memory bus plus wasted core cycles far exceed blocking costs.
 
 ---
 
@@ -100,11 +99,9 @@ Imagine sitting in a parked car staring at a red traffic light with your foot fl
 | **Ownership** | Owned by the single locking thread (binary mutual exclusion + priority inheritance via turnstiles). | Non-owned counting primitive (can be signaled by any thread). |
 
 #### IN DETAIL
-Why did Solaris invent the **adaptive mutex**?
-- Suppose Thread A wants Lock `L` currently held by Thread B for just 50 instructions (~20 nanoseconds):
-  - **If Thread B is actively running right now on Core 2**: B will release `L` in 20 nanoseconds! Putting A to sleep and waking it up (a context switch!) takes ~5,000 nanoseconds—250× slower! So the adaptive mutex **spins** briefly!
-  - **If Thread B is NOT currently running** (maybe B got context-switched off the CPU!): B won't finish for milliseconds! Spinning would burn millions of cycles for nothing—so the adaptive mutex **sleeps** immediately!
-- **Semaphores**, by contrast, are meant for **long waits** (like disk I/O or multi-millisecond locks), so they always block/sleep right away without guessing whether to spin!
+Solaris **adaptive mutexes** eliminate the manual programmer dilemma between spinning and blocking by inspecting lock-holder runtime state dynamically at acquisition time:
+- **Dynamic Spin-vs.-Block Heuristic**: When acquiring a contended mutex guarding a short kernel critical section, Solaris queries whether the thread currently owning the mutex is **actively running on another physical CPU core**. If yes, ownership is likely to end within nanoseconds, so the caller spins briefly rather than paying a multi-microsecond sleep/wakeup context switch. If the owner is **currently sleeping / descheduled** (or on a uniprocessor), spinning is futile, so the adaptive mutex immediately suspends the caller.
+- **Contrast with Semaphores**: Kernel semaphores typically guard long-lived resource waits (such as disk DMA or lengthy I/O transactions), where spinning would waste milliseconds of core compute; hence semaphores unconditionally enqueue waiters to sleep.
 
 ---
 
@@ -121,9 +118,9 @@ A **turnstile** in Solaris is a queue data structure containing threads blocked 
 2. **Saving Kernel Memory**: Instead of embedding a heavy wait-queue inside *every* synchronization object (most locks are uncontended), Solaris attaches one turnstile **per thread** and assigns a thread's turnstile to a lock dynamically *only* when contention occurs.
 
 #### IN DETAIL
-Think about two headaches in an OS kernel that has **100,000 locks**, where 99.9% of locks have nobody waiting on them at any moment:
-1. **Memory Waste**: Putting a full linked-list wait queue inside all 100,000 lock structs wastes megabytes of precious kernel RAM! Since one blocked thread can only wait on **at most 1 lock at a time**, Solaris attaches a tiny **turnstile** structure to each *thread* instead of each *lock*—the first blocked waiter donates its turnstile to become that lock's waiting queue!
-2. **Priority Inversion**: By tracking blocked threads inside the lock's turnstile along with their priorities, Solaris immediately knows who to boost when a VIP thread gets stuck behind a low-priority lock holder (**Priority Inheritance**)!
+**Solaris Turnstiles** solve both kernel metadata bloat and lock-ordering priority inversion for adaptive mutexes and reader–writer locks:
+- **Memory Amortization via Thread-Owned Queues**: Large kernels manage hundreds of thousands of fine-grained locks simultaneously, yet at any instant almost all locks are uncontended. Embedding a full doubly linked wait-queue head inside every lock descriptor wastes megabytes of pinned kernel memory. Since one blocked thread can wait on **at most one lock at a time**, each thread statically carries a compact `turnstile` structure; only the *first* blocked thread waiting on a contended lock attaches its own turnstile via a global lock hash table, while subsequent blocked waiters join that attached queue.
+- **Priority Inheritance Support**: Each turnstile organizes its blocked threads by priority, letting the kernel immediately trace ownership chains and boost a low-priority lock holder's scheduling priority when a higher-priority waiter enters the turnstile.
 
 ---
 
@@ -140,7 +137,9 @@ Think about two headaches in an OS kernel that has **100,000 locks**, where 99.9
 - **Justification**: Semaphore `wait()` decrements an internal integer counter and only blocks if the counter becomes negative (or zero), whereas monitor `wait()` on a stateless condition variable **always** blocks the calling thread unconditionally. Furthermore, monitor `wait()` **atomically releases** the monitor's mutual-exclusion lock upon sleeping (and re-acquires it on wakeup), whereas semaphore `wait()` does not manage any external lock. Finally, semaphore `signal()` increments the counter for future calls, whereas monitor `signal()` is lost if no thread is currently waiting.
 
 #### IN DETAIL
-Calling a semaphore `wait()` while holding a mutex lock freezes the entire system because semaphore `wait()` has no idea you're holding a lock! Monitor `wait(cv)` was explicitly designed to **atomically release the monitor lock AND put the thread to sleep** in one step, and remember: a `signal(cv)` inside a monitor vanishes if nobody is waiting right then, whereas a semaphore `signal()` sticks around in its integer counter!
+Semaphores and Monitor Condition Variables share identically named `wait()` / `signal()` primitives whose internal semantics are fundamentally inverted:
+- **Semaphore (`wait(S)` / `signal(S)`) Statefulness**: Holds an internal integer counter. `wait()` only blocks if `S <= 0`; `signal()` increments `S` persistently, memorizing past signals even when zero threads are currently suspended. However, calling `wait(S)` while retaining another mutex never drops that mutex—causing deadlock.
+- **Monitor Condition Variable (`c.wait()` / `c.signal()`) Atomicity**: Carries zero persistent counter. Calling `c.wait()` inside a monitor **unconditionally suspends** the thread while **atomically releasing the monitor's mutual-exclusion lock** so peer threads can enter to establish the awaited condition; `c.signal()` awakens one waiting thread if present, or becomes a permanent **no-op** if the condition queue is empty.
 
 ---
 
@@ -161,12 +160,9 @@ Calling a semaphore `wait()` while holding a mutex lock freezes the entire syste
    - **Signal Memory**: Semaphore `signal()` increments the counter and is remembered for future `wait()` calls; monitor `c.signal()` has **no effect (is lost)** if no thread is currently waiting on `c`.
 
 #### IN DETAIL
-Think of a monitor like a one-person bank vault room: only one person is allowed inside at a time. Suppose a customer (Consumer) walks in to withdraw \$100, opens the cash drawer, and finds it **empty**!
-- If the customer sits down inside the vault and refuses to leave until money appears, the Teller (Producer) can **never enter the vault** to refill the drawer—permanent deadlock!
-- **Condition variables** give the vault a waiting bench *just outside the lock*: `empty.wait()` **simultaneously locks the customer onto the waiting bench AND unlocks the vault door** so the Teller can step inside, deposit cash, and ring the bell (`empty.signal()`)!
-
-**Key Semantic Contrast**:
-- Semaphore `wait()` decrements a counter and blocks only if $\le 0$ (and `signal()` persists in the counter), whereas Monitor `c.wait()` **atomically releases the monitor lock and always blocks unconditionally** (and `c.signal()` is lost if nobody is waiting).
+A **Monitor** uses two distinct synchronization constructs—an **implicit mutual-exclusion entry lock** plus explicit **condition variables (`c.wait`/`c.signal`)**—to separate mutual safety from conditional coordination:
+- **Deadlock Without Condition Variables**: Only one process may execute inside monitor procedures concurrently. If a Consumer acquires the monitor lock and sees `buffer_count == 0`, simply spinning or calling semaphore-style sleep *while holding the monitor lock* prevents any Producer from ever entering `insert()` to increment `buffer_count`.
+- **Atomic Release–Block–Reacquire Contract**: Condition `not_empty.wait()` moves the Consumer onto `not_empty`'s wait queue and atomically unlocks the monitor boundary. When a Producer deposits an item and invokes `not_empty.signal()`, one blocked Consumer moves toward monitor re-entry, reacquiring mutual exclusion cleanly before resuming.
 
 ---
 
@@ -183,9 +179,9 @@ Think of a monitor like a one-person bank vault room: only one person is allowed
 - **Justification**: A standard blocking semaphore places waiting processes onto an OS sleep queue (`wait()`/`signal()`), consuming no CPU cycles while blocked—the same underlying sleep/wakeup mechanism used by monitor condition variables. Monitors add language-level mutual exclusion and safer structure, not a different hardware sleep mechanism.
 
 #### IN DETAIL
-Be aware of this classic course nuance!
-- In **OSN Endsem 2022**, the key evaluated **blocking OS semaphores** vs. **monitors**: since kernel semaphores already sleep without spinning, monitors have the same blocking behavior (**FALSE**).
-- In **AOS Endsem 2025 Q1.2/Q1.4**, the comparison emphasized how monitors stop developers from writing ad-hoc user-level polling/spin-loops around low-level semaphores (**TRUE**). Mentioning that *kernel-level semaphores already block via wait queues, whereas monitors reduce application-level polling bugs* covers both angles clearly!
+Evaluating whether monitors reduce **busy waiting** relative to semaphores requires distinguishing **kernel primitive semantics** from **application usage errors**:
+- **OS Kernel Level (`FALSE` per OSN 2022 key)**: Both kernel blocking semaphores (`P`/`V`) and monitors suspend blocked threads inside OS kernel wait queues (`Blocked` state) without spinning on CPU flags—neither relies on busy waiting inside the primitive itself.
+- **Software Engineering Level (`TRUE` per AOS 2025 key)**: Because semaphores decouple locking and condition state manually, programmers frequently wrap multi-variable invariants in error-prone user-space spin loops or polling retries (`unlock; sleep; lock; recheck`), whereas monitors natively package atomic condition queues (`c.wait` / `c.signal`), eliminating ad-hoc user polling entirely.
 
 ---
 
@@ -315,18 +311,9 @@ void Southbound_Vehicle() {
 ```
 
 #### IN DETAIL
-Let's trace all three rules carefully to verify why this works and has zero bugs:
-- **Rule (a) — One direction at a time**:
-  - A Northbound car enters directly ONLY if `cur_dir == 0` (empty) OR `cur_dir == 1` (currently Northbound AND `wait_south == 0`). When the last car leaves (`on_bridge == 0`), we only switch `cur_dir` to South if the bridge is completely empty! So North and South cars can **never** be on the bridge together.
-- **Rule (b) — Strict alternation when both ends are waiting**:
-  - Suppose 3 Northbound cars are crossing because `wait_south` was 0. Then a Southbound car arrives (`wait_south = 1`) and blocks on `ok_south`. Any *new* Northbound car arriving now sees `wait_south > 0` and must wait in `wait_north` instead of jumping onto the bridge (preventing South starvation!).
-  - As soon as the currently crossing Northbound batch finishes (`on_bridge == 0`), the exit code checks `if (wait_south > 0)` first! It wakes **exactly one** Southbound car (`on_bridge = 1`). When that Southbound car finishes, its exit code checks `if (wait_north > 0)` first and wakes **exactly one** Northbound car! Thus North and South strictly alternate 1-by-1 while both queues are non-empty!
-- **Rule (c) — Continuous flow when the other side is empty**:
-  - If `wait_south == 0`, any number of Northbound cars enter immediately (`cur_dir == 1 && wait_south == 0`) or are woken together when the bridge drains (`while (wait_north > 0)`).
-- **Deadlock & Starvation Free**: Only one mutex is held briefly around counter updates (never held during `wait(ok_*)` or `Cross_Bridge()`), so deadlock is impossible, and alternation guarantees zero starvation.
-
-**Exam Note (Semaphores vs. Monitor)**:
-- Check the prompt carefully! These three exams explicitly asked for **Semaphores**, whereas **OSN 2022 Midsem Q7** (see [Monitor Solution right below](#10-single-lane-bridge-synchronization-using-a-monitor-mesa-semantics-frequency-1)) asked for a **Monitor** implementation!
+Solving bidirectional **Single-Lane Bridge synchronization via binary semaphores** enforces three concurrent invariants cleanly without busy waiting or spin-retries:
+- **Single-Direction Mutual Exclusion (`cur_dir` + `on_bridge`)**: Simultaneous crossings occur only when `cur_dir` matches arriving traffic and zero opposite-direction vehicles are waiting (`wait_south == 0` / `wait_north == 0`). State transitions happen strictly inside short `mutex`-protected sections, never holding `mutex` across `Cross_Bridge()` or blocking calls.
+- **Turn-Yielding Batched Alternation**: When opposite traffic arrives mid-stream (`wait_south > 0`), newly arriving same-direction vehicles block instead of joining the bridge, preventing infinite starvation of the opposite queue. When the final crossing vehicle exits (`on_bridge == 0`), prioritizing the opposite wait queue (`if wait_south > 0`) transfers control deterministically between queues (`handoff` wakeup).
 
 ---
 
@@ -397,13 +384,9 @@ monitor Bridge {
 ```
 
 #### IN DETAIL
-Let's check why the `while` condition inside `enter_bridge_north()` handles **all three safety and fairness cases** cleanly:
-A Northbound vehicle must **wait** (`free.wait()`) if ANY of these 3 conditions is true:
-1. `on_bridge > 0 && cur_dir == 2`: A Southbound vehicle is currently on the bridge (prevents head-on collision / deadlock!).
-2. `on_bridge > 0 && cur_dir == 1 && num_waiting_south > 0`: Another Northbound vehicle is crossing right now AND a Southbound vehicle is waiting—so the newcomer politely queues instead of starving Southbound traffic! (Notice if `num_waiting_south == 0`, this is FALSE, so consecutive Northbound cars cross together freely!)
-3. `on_bridge == 0 && last_dir == 1 && num_waiting_south > 0`: The bridge just emptied, North went most recently (`last_dir == 1`), and South is waiting—so North yields the next turn to South!
-
-When the crossing vehicle exits (`on_bridge == 0`), `free.broadcast()` wakes all waiting threads; only the thread(s) whose turn condition holds proceed, while everyone else goes back to sleep cleanly inside the `while` loop! *(Note: using a single-lane `on_bridge == 1` boolean, as in the simpler textbook key, simplifies the `while` condition to `while (on_bridge || (last_dir == 1 && num_waiting_south > 0))`, though that allows only 1 vehicle at a time even when no opposite traffic waits.)*
+Implementing the **Single-Lane Bridge under Mesa-style Monitor Semantics** relies heavily on wrapping `free.wait()` inside a **`while` predicate loop** rather than an `if`:
+- **Why Mesa Semantics Mandate `while` Loops**: Unlike Hoare semantics (which instantaneously transfers the monitor lock directly from signaler to awakened thread), **Mesa semantics** place the awakened thread onto the ready/entry queue while the signaler keeps executing until monitor exit. Another thread can slip into the monitor first and invalidate the shared predicate (`on_bridge`, `cur_dir`, `last_dir`) before the woken thread runs.
+- **Three Safety & Starvation Guards**: Re-evaluating `(on_bridge > 0 && cur_dir == OPPOSITE) || (wait_OPPOSITE > 0 && (on_bridge > 0 || last_dir == SAME))` on every wakeup safely enforces mutual collision exclusion, lets consecutive same-side vehicles pipeline when the opposite side is empty, and yields turn alternation when both sides wait.
 
 ---
 
@@ -465,12 +448,9 @@ void writer() {
 4. **Deadlock Free**: Lock acquisition order is strictly hierarchical (`order_mutex` $\to$ `r_mutex` $\to$ `rw_mutex` for readers; `order_mutex` $\to$ `rw_mutex` for writers), eliminating circular wait.
 
 #### IN DETAIL
-Why does the standard naive Readers-Writers solution starve writers? Because if Reader 1 is reading (`read_count = 1`), and Reader 2 arrives before Reader 1 exits, Reader 2 sees `read_count >= 1` and jumps right in—then Reader 3 arrives before Reader 2 exits—and the poor writer waiting for `read_count == 0` **starves forever**!
-
-Adding **`order_mutex`** works like a **single-file ticket turnstile**:
-- Normally, readers zip through the turnstile one after another (`wait(order_mutex)` $\to$ `post(order_mutex)` immediately), so many readers read Google Docs together.
-- The moment a **Writer** wants to edit, the Writer steps up to `order_mutex` and closes the gate behind them while waiting on `rw_mutex`!
-- Now any *newly arriving* Readers wait politely outside the turnstile behind the Writer. As soon as the already-inside readers finish, `read_count` drops to 0, `rw_mutex` opens, the Writer makes their edit exclusively, and then opens the door for all waiting readers! Zero starvation, clean fairness!
+Standard First-Readers-Preference solutions suffer **Writer Starvation** because readers bypass `rw_mutex` whenever `read_count >= 1`, allowing continuous overlapping readers to keep `read_count > 0` forever:
+- **FIFO Turnstile Barrier (`order_mutex`)**: Every arriving Reader and Writer acquires `order_mutex` at entry and holds it purely until admitted past the admission gate (Readers release it immediately upon updating `read_count`; Writers release it once they acquire `rw_mutex` or right at entry before waiting on `rw_mutex` under symmetric queueing).
+- **Fairness Guarantee**: Once a Writer enters the queue on `order_mutex`, all subsequently arriving Readers block behind that Writer at `order_mutex`. Once active inside readers drain (`read_count` drops to `0`), `rw_mutex` transfers immediately to the queued Writer—bounding wait time for both classes symmetrically (assuming FIFO-strong POSIX semaphores).
 
 ---
 
@@ -489,9 +469,9 @@ Adding **`order_mutex`** works like a **single-file ticket turnstile**:
   - Here, the 100,000 records are cleanly partitioned into **10 strictly disjoint slices** of 10,000 records each, processed completely independently (**embarrassingly parallel**). Since no thread writes to data accessed by another thread (and assuming separate file offsets/descriptors), there are **no race conditions**, so synchronization overhead is unnecessary.
 
 #### IN DETAIL
-Concurrency bugs (**race conditions**) only happen when two threads touch the **same mutable variable or shared file-offset pointer** and at least one is writing!
-Here, Thread 0 handles records `0..9999`, Thread 1 handles `10000..19999`, ..., Thread 9 handles `90000..99999` completely independently!
-- If each thread opens the file separately (giving each thread its own independent file offset!) or uses `pread(fd, buf, size, offset)`, **zero mutable state is shared**—putting locks around independent work would just slow the 10 threads back down to sequential 1-thread speed! *(Note: in a single-sentence exam assumption, explicitly state "assuming each thread uses its own file descriptor or positional `pread()` rather than sharing one `lseek` cursor.")*
+Race conditions arise *only* when three structural elements coincide: **shared mutable memory**, **unsynchronized concurrent access**, and **at least one writer**:
+- **Disjoint Partition Invariant**: Dividing an input array or file cleanly into non-overlapping record indices $[s_i, e_i)$ guarantees zero write–write or read–write conflicts in shared memory across worker threads—making mutual-exclusion locks unnecessary (`embarrassingly parallel`).
+- **System-Call File Offset Caveat**: In POSIX I/O, multiple threads sharing one process-wide `int fd` implicitly share a **single kernel open-file offset pointer** modified atomically or raced by sequential `read()`/`lseek()` calls. Safe lock-free concurrent I/O therefore requires either **independent `open()` file descriptors per thread** or stateless positional **`pread(fd, buf, count, offset)`** syscalls.
 
 ---
 
@@ -546,9 +526,9 @@ void SafariCar(int id) {
 - **Starvation Analysis**: **Starvation-Free** provided the underlying OS semaphores use **FIFO (strong) wakeup queues**—both waiting passengers and waiting cars are matched in strict arrival order. *(With weak/unfair semaphores, a waiting passenger/car could theoretically be bypassed repeatedly.)*
 
 #### IN DETAIL
-Look carefully at the subtle deadlock trap in two-way handshakes:
-- If `Passenger` called `wait(car_avail)` *before* `signal(pass_waiting)`, and `Car` called `wait(pass_waiting)` *before* `signal(car_avail)`, **both would sleep forever on the very first step!**
-- By having **both sides signal their presence first** (`signal(pass_waiting)` before `wait(car_avail)`, and `signal(car_avail)` before `wait(pass_waiting)`), the rendezvous opens cleanly with zero circular wait!
-- Adding `boarded` ensures the car doesn't start driving before the passenger sits down, and `ride_over` ensures the passenger stays in the car until the tour finishes! *(Wait: what if $n$ cars run concurrently and ride durations differ? Notice `ride_over` unblocks *a* riding passenger when *any* car finishes—for exact per-car pairing, each car $j$ uses its own private `car_ride_over[j]` passed via a bounded queue, though the 4-semaphore counting model above is the standard clean exam solution!)*
+Synchronizing two independent producer/consumer agent types (`m` Passengers, `n` single-seat Safari Cars) demonstrates the **asymmetric semaphore rendezvous handshake**:
+- **Preventing Handshake Deadlock**: If both Passenger and Car waited first before signaling (`wait(car_avail)` before `signal(pass_waiting)` and `wait(pass_waiting)` before `signal(car_avail)`), both parties block forever in a symmetric hold-and-wait deadlock. Ordering one side to advertise availability (`signal(pass_waiting)` -> `wait(car_avail)`) breaks circular dependency cleanly.
+- **Ensuring Synchronous Board & Unload Boundaries**: Introducing explicit barrier semaphores (`boarded`, `ride_done`, `unloaded`) enforces exact state ordering so cars never depart mid-boarding, passengers never exit mid-ride, and each car resets cleanly before accepting its next passenger.
 
 ---
+

@@ -47,12 +47,9 @@ Total execution time $T$ can exceed $\sum_{i=1}^N t_i$ due to **multiprogramming
 4. **Resource & Lock Contention**: Processes competing for shared locks, disk heads (extra seek latency), memory bus bandwidth, or non-overlapped I/O waits waste additional execution time.
 
 #### IN DETAIL
-Notice why students sometimes find this surprising: *"Wait, isn't multiprogramming supposed to overlap I/O so $T$ is LESS than $t_1 + t_2 + \dots + t_N$?"*
-Usually yes—*unless* the hidden taxes of sharing a single machine overwhelm the I/O overlap!
-Think of cooking 3 recipes one-at-a-time vs. juggling all 3 simultaneously in a tiny kitchen:
-- Every time you switch recipes (**context switch**), you waste time putting away pans and reading where you left off (**TLB/cache pollution**).
-- If all 3 recipes don't fit on the counter (**RAM full $\to$ thrashing**), you spend half your time running back and forth to the basement fridge (**disk page faults**)!
-- Result: Juggling all $N$ together can take *longer* ($T > \sum t_i$) than running them sequentially one by one!
+While multiprogramming aims to make total completion time $T < \sum t_i$ by overlapping one process's I/O waits with another process's CPU execution, several systemic overheads can push $T > \sum t_i$:
+- **Context-Switch & Cache/TLB Pollution**: Each preemption burns pure OS cycles saving/restoring PCB registers and triggers cold L1/L2 cache misses plus TLB misses once a new address space takes over, slowing individual instruction throughput compared to isolated execution.
+- **Hardware Contention & Thrashing**: Concurrent processes contend for shared DRAM channels, memory buses, and disk seek queues; worst of all, exceeding resident RAM capacity induces heavy swapping/page-fault thrashing ($T \gg \sum t_i$).
 
 ---
 
@@ -69,10 +66,9 @@ Total execution time $T$ can approach $\max(t_1, t_2, \dots, t_N)$ in two ways:
 2. **Parallel Execution on Multiprocessor/Multicore Hardware**: With $\ge N$ CPU cores, all $N$ processes execute simultaneously on separate cores, finishing at $\max(t_1, \dots, t_N)$.
 
 #### IN DETAIL
-Contrast this with **2025 AOS Midsem Q3** (which asked how $T$ can be *greater* than $\sum t_i$)!
-Here, suppose Process A takes $t_A = 100\text{ ms}$ (**10 ms CPU + 90 ms Disk**), and Process B takes $t_B = 40\text{ ms}$ (**20 ms CPU + 20 ms Network**).
-- Run sequentially: $100 + 40 = 140\text{ ms}$.
-- Run concurrently in a multiprogrammed OS: Process A uses the CPU for 10 ms then waits 90 ms on the disk—during that 90 ms disk wait, Process B easily finishes its entire 40 ms CPU+Network job! So BOTH finish in **100 ms = $\max(t_A, t_B)$**!
+Under ideal concurrency without contention, overlapping computation across time or hardware resources lowers aggregate wall-clock completion time $T$ toward $\max(t_1, t_2, \dots, t_N)$:
+- **Single-CPU Compute/I/O Overlap**: If one process executes mostly CPU bursts (duration $T_{\max}$) while $N-1$ other processes spend most of their lifetimes waiting asynchronously in independent DMA disk/network I/O queues with minimal CPU slices, all I/O latencies run entirely inside the dominant job's compute shadow, bounding total wall-clock makespan near $T_{\max}$.
+- **Multi-Core / Multi-Processor Parallelism**: On an $M$-core SMP machine where $M \ge N$ and no data dependencies or lock serialization constrain execution, every process runs independently on its own core simultaneously, achieving true wall-clock makespan equal to the longest individual process ($\max_i t_i$).
 
 ---
 
@@ -96,10 +92,9 @@ Here, suppose Process A takes $t_A = 100\text{ ms}$ (**10 ms CPU + 90 ms Disk**)
    - Furthermore, **priority decay / aging** reduces recorded recent CPU usage as a process waits, periodically boosting waiting CPU-bound processes so they never starve.
 
 #### IN DETAIL
-This is actually the exact mechanism used in **classic UNIX scheduling** (and MLFQ with aging)!
-Think of priority like "how tired/full you are from eating CPU time recently":
-- An **I/O-bound process** runs for just 1 ms, then leaves for 50 ms to wait for disk or keyboard input. When it comes back, it has consumed almost *zero* CPU recently, so the scheduler lets it jump right to the front, do its tiny 1 ms burst, and get back to I/O—keeping disks and users happy!
-- Meanwhile, a **CPU-bound process** eats 100% of the CPU when it gets a turn, so its "recent CPU usage" shoots up and its priority drops. Does it starve forever? **No!** First, whenever the I/O jobs are waiting on the disk, the CPU-bound job gets all the remaining CPU cycles. Second, every second that passes, the kernel decays everyone's "recent CPU" counter (aging), so a neglected CPU-bound job naturally becomes "fresh" again and gets scheduled!
+Dynamic priority decay based on **recent CPU consumption** (exemplified by classic UNIX `decay` scheduling) adapts automatically without requiring prior workload labels:
+- **Negative-Feedback Mechanism**: Every timer tick, the OS increments a running process's recent-CPU counter (`p_cpu`) and periodically decays all counters exponentially (e.g., $\text{p\_cpu} \leftarrow \text{p\_cpu} / 2$), setting scheduling priority inversely proportional to `p_cpu`.
+- **Automatic Convergence**: I/O-bound processes run briefly ($< 1\text{ ms}$) before blocking for disk/network completion, keeping their `p_cpu` tiny and yielding top scheduling priority the instant their I/O returns. CPU-bound processes exhaust full timer quanta, accumulating large `p_cpu` values and automatically drifting to lower priority queues where they soak up idle background cycles without starving I/O devices.
 
 ---
 
@@ -115,11 +110,9 @@ Think of priority like "how tired/full you are from eating CPU time recently":
 - **Justification**: I/O-bound processes execute very short CPU bursts before blocking for lengthy I/O operations. By assigning higher priority to I/O-bound processes, the OS dispatches them quickly so they can initiate I/O immediately and keep I/O devices busy, while CPU-bound processes utilize the remaining CPU time while I/O is in progress. This avoids the convoy effect and maximizes overall CPU utilization, I/O utilization, and interactive response time.
 
 #### IN DETAIL
-In general-purpose OSes (and explicitly in Prof. Krishna Reddy's scheduling lectures and UNIX), prioritizing I/O-bound jobs is a win-win:
-- Suppose Job A needs **1 ms CPU then 99 ms disk**, and Job B needs **100 ms CPU**.
-- If **A runs first**: at $t=1\text{ ms}$, A starts its disk operation, and from $t=1\text{ ms}$ to $t=100\text{ ms}$ **both the CPU (running B) and the disk (serving A) work in parallel at ~100% utilization!**
-- If **B ran first** (FCFS): the disk sits 100% idle for the first 100 ms, wasting hardware throughput and delaying A's response by 100×!
-*(And aging/priority decay ensures B never starves.)*
+Prioritizing **I/O-bound processes** over **CPU-bound processes** improves global hardware utilization across both processors and slow peripheral subsystems simultaneously:
+- **Short Critical Dispatch Requirement**: An I/O-bound process requires only a brief CPU burst (typically microseconds to a few milliseconds) to parse a read buffer and enqueue its next multi-millisecond DMA request. Giving it preemptive priority lets the OS keep disk arms, SSD channels, and NICs continuously saturated.
+- **Minimal Penalty to CPU-Bound Jobs**: Because I/O-bound jobs block swiftly, they consume negligible total CPU percentage before relinquishing the processor back to waiting CPU-bound threads—maximizing overlap between electronic computation and slow I/O transfers simultaneously.
 
 ---
 
@@ -143,10 +136,9 @@ If the OS **misclassifies** processes—assigning **high priority to CPU-bound**
 - Correctly giving higher priority to I/O-bound processes maximizes CPU–I/O overlap and keeps CPU-bound jobs running whenever I/O-bound processes block (no starvation via aging/recent-usage decay).
 
 #### IN DETAIL
-Look at what happens when you flip priorities upside down (putting 10-hour heavy math jobs ahead of 1-ms keyboard/disk jobs):
-- **I/O devices sit starving**: Disks and network cards sit completely empty doing **zero work** while the CPU crunches a long math loop—because the tiny 1 ms I/O-bound jobs that feed work to those disks aren't allowed onto the CPU!
-- **Users freeze**: Interactive terminals lag for seconds waiting behind batch math jobs!
-- Thus, wrong classification destroys *both* **interactive responsiveness** AND **overall multi-device system throughput**!
+Inverting scheduling preference to prioritize **CPU-bound processes** above **I/O-bound processes** reverses hardware pipelining and triggers systemic underutilization:
+- **Device Starvation & Convoy Effect**: Short I/O-bound processes stall indefinitely in the Ready Queue waiting behind multi-second CPU computations. Meanwhile, disk and network subsystems fall completely idle because their initiating processes cannot obtain the tiny CPU slices needed to dispatch subsequent I/O commands.
+- **Interactive Latency Collapse**: Interactive user threads (keyboard, GUI, RPC handlers) are fundamentally I/O-bound; delaying them destroys perceived responsiveness and lowers overall job completion throughput across the mixed workload.
 
 ---
 
@@ -166,10 +158,8 @@ Look at what happens when you flip priorities upside down (putting 10-hour heavy
 - **Result**: Severe increase in waiting/turnaround time for I/O-bound jobs and sharp drops in **both CPU and I/O device utilization**.
 
 #### IN DETAIL
-Imagine a grocery checkout lane with 10 people buying a single bottle of water (**I/O-bound processes**, needing 1 second at the register) standing behind 1 person with three overflowing shopping carts (**CPU-bound process**, needing 15 minutes).
-Under **FCFS** (strict line, no express lane, no preemption):
-- Everyone with 1 bottle waits 15 minutes just to spend 1 second at the register! Their average waiting time skyrockets.
-- Worse for the whole system: while the CPU is busy scanning the 3 carts, the disk/I/O lanes sit empty doing zero work! Then all 10 water-bottle buyers leave to wait on I/O at once, leaving the CPU sitting completely idle! That traffic jam is called the **Convoy Effect**.
+First-Come, First-Served (**FCFS**) exhibits the classic **Convoy Effect** because it is strictly non-preemptive and ignores remaining burst durations:
+- **Mathematical Delay Amplification**: If one CPU-bound process arrives just ahead of $k$ short I/O-bound processes (say CPU burst $B = 100\text{ ms}$, short bursts $b = 1\text{ ms}$), all $k$ short processes wait the full $100\text{ ms}$ in the Ready Queue while all I/O peripherals sit idle. Once the CPU-bound process finally yields for I/O, the $k$ I/O jobs flash through $1\text{ ms}$ CPU bursts and immediately bunch up together back in I/O queues—repeatedly creating periodic CPU idle valleys followed by long I/O-bound starvation delays.
 
 ---
 
@@ -182,7 +172,9 @@ Under **FCFS** (strict line, no express lane, no preemption):
 - **Example**: If a low-priority batch process (or infinite loop) holds the CPU and an urgent **high-priority / real-time** process (or interactive user event) becomes ready via an interrupt, the urgent process cannot run until the running process voluntarily yields—violating real-time deadlines and hurting interactive response time.
 
 #### IN DETAIL
-Suppose a simple non-preemptive OS starts running a heavy scientific simulation that won't touch I/O for 60 seconds. Half a second later, a pacemaker monitor or audio-playback thread wakes up needing 1 ms of CPU to avoid skipping or missing a hard deadline! Because the scheduler cannot preempt the running job, the urgent task sits helplessly in the ready queue for 59.5 seconds—making non-preemptive scheduling unusable for interactive or hard real-time workloads.
+Non-preemptive scheduling creates **unbounded worst-case scheduling latency**, making it structurally incompatible with multi-user time-sharing and real-time guarantees:
+- **Arbitrary CPU Hold Duration**: Once any process enters `Running` state, neither timer interrupts nor higher-priority wakeups can reclaim the core until that thread explicitly invokes a blocking syscall, exits, or executes `yield()`.
+- **Cascading Failure Modes**: An infinite compute loop freezes an entire uniprocessor system permanently; even well-behaved long computations violate strict real-time deadlines (e.g., audio buffer underflows, sensor drop-outs, or safety-critical control loops) whenever high-priority tasks become runnable mid-burst.
 
 ---
 
@@ -197,9 +189,8 @@ Suppose a simple non-preemptive OS starts running a heavy scientific simulation 
   - Conversely, achieving fast **response time** requires tiny time slices (frequent preemptions/Round Robin), which increases context-switch overhead and lowers effective **CPU utilization**.
 
 #### IN DETAIL
-Imagine a surgeon trying to maximize **"percentage of hour spent cutting"** (CPU utilization) vs. **"how fast new emergency walk-ins get greeted"** (response time):
-- If the scheduler never interrupts long jobs, 100% of CPU cycles go to useful job work (zero context-switch waste!), **but** interactive users wait seconds for a single keypress (**bad response time**).
-- If the scheduler slices time every 0.1 ms to give instant response, interactive feel is blazing fast, **but** half the CPU time is wasted saving/restoring registers and flushing caches (**lower effective CPU utilization**)!
+Scheduling criteria form inherent trade-offs where optimizing one metric mathematically penalizes another across fixed CPU capacity:
+- **Throughput / CPU Utilization vs. Response Time**: Every preemptive context switch burns non-productive kernel instructions ($T_{\text{ctx}}$) plus warm L1/L2 cache and TLB state (indirect cold-cache cycles afterward). Maximizing pure CPU efficiency prefers huge time quanta or zero preemption (maximizing useful-instruction percentage per second), whereas guaranteeing rapid **response time** for interactive tasks requires short quanta ($q$) and frequent preemptions—trading higher context-switch overhead for bounded latency.
 
 ---
 
@@ -217,8 +208,9 @@ Imagine a surgeon trying to maximize **"percentage of hour spent cutting"** (CPU
   - Because it never consumes a full quantum continuously, the scheduler misclassifies it as an interactive/I/O-bound job and **keeps it permanently in the highest-priority queue**, maximizing its CPU allocation.
 
 #### IN DETAIL
-Think of MLFQ as a bouncer giving VIP wristbands to anyone who takes quick 9-millisecond turns on a game machine (assuming anyone playing for 10+ ms is a greedy hog and sending them to the slow basement!).
-A sneaky user can **game** this rule easily: run heavy computation for **9.9 ms**, then call `write(1 byte to /dev/null)` or `sleep(1 µs)`! The OS thinks *"Oh, short I/O-bound interactive program!"* and puts you right back at the front of the VIP queue—letting you hog the CPU! *(Modern MLFQs defeat this by tracking **total CPU time consumed** at each priority level rather than resetting the budget on every I/O.)*
+Multilevel Feedback Queue (**MLFQ**) promotion/demotion rules classify tasks empirically by monitoring whether a running process exceeds its allotted time quantum before blocking:
+- **Gaming Heuristic Exploit**: Because MLFQ assumes any thread yielding before quantum expiration $q$ is interactive/I/O-bound, a malicious or greedy CPU-bound application can inject synthetic voluntary pauses (`usleep(1)`, dummy I/O read, or `sched_yield`) immediately prior to consuming $q$—staying permanently pinned inside the highest-priority queue and starving genuine workloads.
+- **System Countermeasures**: Modern OS schedulers defend against gaming via **cumulative CPU accounting** across slices (like `vruntime` in Linux CFS or total-time tracking per queue level in MLFQ) rather than per-burst reset timers, alongside automatic **aging / periodic priority resets** to lift starved lower-tier tasks.
 
 ---
 
@@ -246,13 +238,9 @@ A sneaky user can **game** this rule easily: run heavy computation for **9.9 ms*
     - Also, a process whose quantum resets/doesn't reset properly after blocking can make waiting times unpredictable.
 
 #### IN DETAIL
-Look at why ordinary Round Robin frustrates batch jobs: a batch job needing 10 seconds with a 50 ms quantum gets interrupted **200 times**, wasting time on 200 context switches and cold caches.
-**Progressive Round Robin** tries to be clever: *"Start small (50 ms) so short interactive jobs finish fast; if you're still running on lap 2, lap 3, lap 4, we know you're a long batch job, so we'll give you 100 ms, 150 ms, 200 ms so you stop wasting context-switch overhead!"*
-
-Sounds great—until you spot the fatal flaw:
-- Suppose Batch Job A has been running for 20 rounds. Its personal quantum is now **$1000\text{ ms}$ (1 full second)**!
-- Right now, a user hits a key in an interactive editor. Even though the interactive job only needs 2 ms, it has to sit and wait until Batch Job A finishes its huge 1-second time slice (plus any other long batch jobs ahead of it!).
-- In other words, **giving older jobs huge quanta destroys the worst-case response-time guarantee of ordinary Round Robin ($q \times (N-1)$)** and brings back the **Convoy Effect**! (That's why real systems like MLFQ keep interactive jobs in *high-priority* short-quantum queues and drop batch jobs to *lower-priority* long-quantum queues, where incoming interactive jobs immediately *preempt* the batch job!)
+**Progressive Round Robin** reconciles interactive latency and batch throughput by coupling each process's time quantum to its accumulated execution duration within a single scheduler framework:
+- **Dynamic Per-Process Slicing ($50, 100, 150\dots\text{ ms}$)**: Newly arrived or freshly unblocked interactive tasks start at small initial quanta ($50\text{ ms}$), delivering fast initial response latency without starving peers.
+- **Amortized Batch Overhead**: Long CPU-bound batch jobs remain runnable through consecutive turns; doubling or incrementing their quantum geometrically reduces total context switches from $O(T_{\text{job}} / q)$ to $O(\log(T_{\text{job}}))$ or $O(\sqrt{T_{\text{job}}})$, substantially improving cache locality and raw CPU efficiency relative to fixed small-quantum Round Robin.
 
 ---
 
@@ -273,9 +261,9 @@ Traditional UNIX uses a **dynamic priority-based preemptive scheduling algorithm
 4. **Negative Feedback (No Starvation)**: As a process consumes CPU, its priority drops; as a neglected process waits, its recent usage decays and its priority rises.
 
 #### IN DETAIL
-Classic UNIX didn't try to guess how long a program would run in advance. Instead, it measured **what the process actually did in the last second**:
-- **Interactive processes** (typing in an editor, running shell commands) spend 99% of their time waiting on humans or disks, so their `CPU / real_time` ratio is tiny. Result: UNIX automatically gives them top user priority, keeping the terminal snappy!
-- **CPU-heavy loops** burn 100% of their slice, so their priority drops every second—preventing them from starving interactive users. Meanwhile, if multiple CPU hogs exist at the bottom tier, they take fair 1-second turns, and aging ensures nobody gets permanently stuck!
+Classic **UNIX SVR3/BSD time-sharing scheduling** maintains dynamic priorities through an integer table updated at every clock tick and recomputed every second:
+- **Priority Separation**: Kernel/system wait events receive fixed low numerical priorities (higher urgency, e.g., $0\text{--}49$, ordered so disk I/O wakes above TTY above user processes), while user-mode computation sits in higher numerical tiers ($\ge 50$).
+- **Decay Formula**: User priority updates roughly as $P_j(i) = \text{Base} + \frac{\text{CPU}_j(i)}{2} + \text{nice}_j$, where $\text{CPU}_j$ increments during active execution and decays exponentially (`CPU_j /= 2`) every second. This mathematically enforces negative feedback: recently idle/blocked jobs surge to top priority, while sustained CPU hogs progressively sink downward.
 
 ---
 
@@ -292,11 +280,9 @@ Classic UNIX didn't try to guess how long a program would run in advance. Instea
 3. **Priority Inversion & Lack of Bounded Worst-Case Execution**: Real-time applications (control systems, avionics, robotics, live audio/video) require strict **deterministic latency guarantees**, which non-preemptive kernels cannot provide. *(Modern RTOS kernels and `PREEMPT_RT` Linux fix this by making the kernel itself preemptible.)*
 
 #### IN DETAIL
-Suppose a low-priority background backup script calls a heavy `sync()` or `unlink()` system call in classic UNIX, stepping inside the kernel for **50 milliseconds**.
-At millisecond 1, an emergency missile-guidance or airbag-sensor process (**hard real-time process**, deadline = 5 ms) wakes up!
-- The interrupt controller runs the quick wakeup handler and marks the real-time thread `READY` with top priority.
-- **Problem**: Because classic UNIX protected kernel data structures simply by forbidding *process preemption inside kernel mode*, the scheduler isn't allowed to kick the backup script off the CPU until its 50 ms syscall finishes!
-- Result: The real-time process misses its 5 ms deadline by 45 ms—catastrophic for hard real-time systems!
+Traditional non-preemptive UNIX kernels forbid kernel-mode preemption to protect internal kernel invariants cheaply without fine-grained locking:
+- **Design Assumption**: If only one thread executes inside Kernel Mode at a time on a uniprocessor, kernel structures (inode lists, buffer-cache chains, process tables) cannot be interleaved mid-mutation by another system call—removing the need for mutex locks on every kernel subsystem.
+- **Real-Time Dispatch Latency Penalty**: When an application enters a complex system call (e.g., `fsync()`, recursive path lookup, bulk `fork()` copy), any real-time thread awakened by a hardware interrupt must wait until that syscall voluntarily completes and returns across the User/Kernel boundary—introducing arbitrary, multi-millisecond **dispatch latency** that breaks real-time deadline determinism.
 
 ---
 
@@ -313,10 +299,9 @@ At millisecond 1, an emergency missile-guidance or airbag-sensor process (**hard
 2. **Maintain Kernel Data Consistency Safely**: Unlike arbitrary preemption anywhere in kernel mode (which risks corrupting shared kernel tables without fine-grained locking everywhere), placing explicit preemption points **only where kernel data structures are in a consistent, lock-free state** achieves low latency safely with minimal locking complexity (e.g., used in Solaris 2 / preemptible UNIX kernels before full kernel preemption).
 
 #### IN DETAIL
-Suppose a low-priority background job calls a system call that loops 100,000 times inside the kernel.
-- **No Preemption in Kernel**: An urgent high-priority thread wakes up and waits helplessly for the entire 100,000-step syscall to finish!
-- **Preemption Everywhere**: Every single line of kernel code now needs complex spinlocks/mutexes—hard and slow in classic kernels!
-- **Preemption Points (Smart Compromise!)**: Inside that 100,000-step kernel loop, at clean moments where no internal kernel table is half-updated, the kernel puts a quick check (`if (need_resched) yield_cpu()`). Now the high-priority thread runs almost immediately while kernel invariants stay 100% intact!
+**Preemption points** represent a deliberate engineering compromise between fully non-preemptive monolithic kernels and fully lock-instrumented preemptive kernels:
+- **Mechanism**: Developers insert explicit voluntary yield checks (`if (need_resched) schedule();`) at well-defined **quiescent locations** inside lengthy kernel loops (buffer scans, large memory clears, filesystem traversals) where all shared kernel invariants and linked structures are temporarily consistent and zero spinlocks are held.
+- **Bounded Latency Benefit**: Urgent real-time or higher-priority threads no longer wait for an entire multi-millisecond system call to unwind—reducing worst-case dispatch latency to the interval between safe checkpoints without incurring fine-grained locking overhead across the entire legacy kernel codebase.
 
 ---
 
@@ -340,14 +325,9 @@ Suppose a low-priority background job calls a system call that loops 100,000 tim
 - **Application**: Widely used in real-time operating systems (e.g., VxWorks/Mars Pathfinder fix, POSIX `PTHREAD_PRIO_INHERIT`) and Solaris turnstiles for adaptive mutexes/reader-writer locks.
 
 #### IN DETAIL
-A famous real-world disaster illustrates this exact bug: **NASA's Mars Pathfinder (1997)** kept crashing and rebooting on Mars because of **Priority Inversion**!
-Here's how it happens:
-- **VIP ($H$)** needs a conference room key currently held by **Intern ($L$)** for 2 minutes.
-- VIP arrives and waits at the door for Intern to finish.
-- Suddenly **Middle Manager ($M$)** walks in. Because Middle Manager outranks Intern, the scheduler kicks Intern off the CPU to run Middle Manager's 3-hour presentation!
-- Now Intern can't finish the 2-minute work, so Intern never drops the key, and **VIP stays stuck waiting 3 hours behind Middle Manager!**
-
-**Priority Inheritance Protocol** fixes this elegantly: the moment VIP starts waiting on Intern's lock, the OS says *"While holding VIP's key, Intern temporarily wears VIP's badge!"*. Now Middle Manager cannot interrupt Intern; Intern finishes in 2 minutes, hands over the key, returns the VIP badge, and VIP runs right away!
+**Priority Inversion** arises whenever synchronization blocking interacts with preemptive priority scheduling across three or more priority levels ($H > M > L$):
+- **Inversion Mechanism**: Low-priority thread $L$ holds shared lock $R$. High-priority thread $H$ arrives, preempts $L$, requests $R$, and blocks. Subsequently, unrelated medium-priority thread $M$ (which never uses $R$) becomes runnable and preempts $L$ continuously because $M > L$—indirectly blocking highest-priority thread $H$ for $M$'s entire unbounded execution duration (a real failure observed in NASA's 1997 Mars Pathfinder RTOS).
+- **Priority Inheritance Protocol (PIP)**: Temporarily elevates $L$'s effective scheduling priority to $\max(P_L, \max_{t \in \text{waiters}(R)} P_t) = P_H$ while $L$ retains $R$. $M$ can no longer preempt $L$, ensuring $L$ promptly finishes its critical section, releases $R$, drops back to $P_L$, and immediately wakes $H$.
 
 ---
 
@@ -365,7 +345,9 @@ Here's how it happens:
 - **Justification**: **Processor affinity** tries to keep a process executing on the exact same CPU core to preserve its warm L1/L2 cache state and avoid costly cache misses. Conversely, **load balancing** (via push or pull migration) actively moves processes away from overloaded cores onto idle cores, which breaks processor affinity and invalidates cache warmth—creating a direct performance trade-off.
 
 #### IN DETAIL
-Think of **Processor Affinity** as keeping a chef at their own prepped kitchen station (all knives and ingredients already warm in their local cache!). **Load Balancing** taps that chef on the shoulder and yells *"Switch to Station #4 because it's empty!"*—evening out the workload across cores, at the exact cost of leaving behind all their warm cache contents!
+**Processor Affinity** and **Load Balancing** pursue fundamentally competing hardware vs. queueing objectives in Symmetric Multiprocessing (SMP) kernels:
+- **Microarchitectural Basis of Affinity**: Keeping thread $T$ pinned to Core $k$ preserves warm **L1/L2 private caches** and active **TLB translation entries** across context switches, avoiding massive compulsory cache-miss storms and memory-bus invalidation traffic.
+- **Load-Balancing Trade-off**: If Core $k$'s run queue accumulates multiple runnable threads while Core $j$ sits idle, leaving $T$ on Core $k$ wastes compute capacity across Core $j$. Pulling or pushing $T$ via migration evens out core queue depths (**work conservation**) at the immediate cost of invalidating $T$'s warm private cache state on Core $k$ and forcing cold cache re-population on Core $j$.
 
 ---
 
@@ -410,9 +392,9 @@ Think of **Processor Affinity** as keeping a chef at their own prepped kitchen s
    - **Running $\to$ Ready**: Preempted when its **hardware timer quantum expires** (so other processes get fair CPU turns).
 
 #### IN DETAIL
-Think of these two workloads in action:
-- **Collaborative Coding** runs for just 0.5 ms to draw a character on screen, then immediately hits `read(keyboard)` or `recv(network)` and **blocks**—spending 99% of its life jumping between `Blocked` and `Ready`, getting tiny quick sips of `Running`!
-- **Language Model Retraining** (with zero I/O assumed) never waits for a disk or user—it wants to crunch matrix math nonstop! Without a timer interrupt, it would stay `Running` forever until finished. Because UNIX/LangOS is preemptive, every time its time slice ticks out, the timer kicks it **Running $\to$ Ready**, giving interactive sessions a turn, and then schedules it right back **Ready $\to$ Running**—skipping `Blocked` completely!
+Process state transitions and scheduling frequency dictate how context-switch latency ($T_{\text{ctx}}$) impacts net CPU efficiency:
+- **Workload Divergence**: I/O-bound collaborative tasks traverse `Running -> Blocked -> Ready -> Running` after tiny sub-millisecond CPU bursts, incurring a high rate of context switches per unit work; compute-heavy batch workloads (`LangOS retraining`) traverse strictly `Running <-> Ready` purely at timer-quantum boundaries without `Blocked` transitions.
+- **Efficiency Formula**: Over one scheduling interval of active execution $Q$ followed by switch latency $S$, true CPU utilization efficiency is bounded by $\eta = \frac{Q}{Q + S}$. Increasing $S$ linearly degrades efficiency unless $Q$ scales proportionally—which in turn increases interactive latency.
 
 ---
 
@@ -479,10 +461,9 @@ Think of these two workloads in action:
 2. **Large Quantum + Shortest-First Arrival Order**: Time quantum $q \ge \max_i(\text{burst}_i)$ (so RR becomes non-preemptive FIFO) **AND** the processes are queued in ascending order of burst length (or have equal burst lengths), making RR execute the exact same non-preemptive order and first-run times as SJF.
 
 #### IN DETAIL
-Look at the sharp contrast in **Scenario B** between **SJF/FIFO** and **Round Robin ($q=1\text{ ms}$)**:
-- **SJF** finishes quick job $P_1$ at $10\text{ ms}$ and $P_2$ at $30\text{ ms}$ (**Avg TAT = 33.33 ms**), **but** poor $P_3$ sits completely untouched for **30 ms** before running a single instruction (**Avg RT = 13.33 ms**)!
-- **Round Robin** lets $P_1, P_2, P_3$ *all* start within 2 ms (**Avg RT = 1.00 ms**—amazing interactivity!), **but** by stretching everyone out simultaneously, $P_1$ doesn't finish until **28 ms** and $P_2$ until **49 ms** (**Avg TAT = 45.67 ms**)!
-That is the fundamental **Response Time vs. Turnaround Time trade-off** in CPU scheduling!
+Scenario comparison between **SJF/FCFS** and **Round Robin ($q=1\text{ ms}$)** exposes the fundamental tension between **Average Turnaround Time** and **Average Response Time**:
+- **SJF Optimality Proof**: Running non-preemptive shortest jobs sequentially minimizes $\sum \text{TAT}_i$ because every $1\text{ ms}$ given to a shorter job shrinks waiting time for fewer future jobs—here eliminating prolonged concurrent execution ($P_1$ exits at $10\text{ ms}$, $P_2$ at $30\text{ ms}$, avg $\text{TAT}=33.33\text{ ms}$), yet starves $P_3$'s first execution until $t=30\text{ ms}$ (avg $\text{RT}=13.33\text{ ms}$).
+- **Round Robin Interactivity**: Slicing at $q=1\text{ ms}$ bounds initial response time proportionally to $q \cdot (N-1)$ (avg $\text{RT}=1.00\text{ ms}$), but interleaving all three bursts stretches earlier jobs' completion times dramatically until near the end of the entire schedule ($P_1$ exits at $28\text{ ms}$, avg $\text{TAT}=45.67\text{ ms}$). When bursts and arrivals are identical, SJF degenerates to FCFS, whereas RR sacrifices TAT even for equal bursts unless bursts align cleanly.
 
 ---
 
@@ -526,10 +507,9 @@ That is the fundamental **Response Time vs. Turnaround Time trade-off** in CPU s
   - **Average Turnaround Time** $= \frac{9 + 12 + 9}{3} = \frac{30}{3} = \mathbf{10.00\text{ ms}}$.
 
 #### IN DETAIL
-Watch out for a common exam pitfall: on the scanned paper, a student ticked `c. 11.33 ms`, which is **mathematically impossible**! Let's see why:
-- Total CPU needed across all 3 processes = $5 + (2 + 2) + 4 = 13\text{ ms}$, and the CPU is never idle from $t=0$ to $t=13$.
-- Even if you test *every possible* tie-breaking order when simultaneous events occur (new arrival vs. I/O return vs. preempted process), the only achievable averages are `9.67 ms`, **`10.00 ms`**, `10.33 ms`, and `10.67 ms` (`32/3`). So **`a. 10.00 ms`** is unequivocally the correct MCQ option!
-- Also notice why $P_2$ has $\text{TAT} = 12\text{ ms}$: Turnaround Time always measures **wall-clock duration from arrival (`1 ms`) to final exit (`13 ms`)**, which naturally includes its 4 ms I/O wait inside `[5, 9]`.
+When analyzing **Round Robin ($q = 1\text{ ms}$)** schedules that combine CPU bursts and asynchronous I/O intervals, turnaround accounting must separate active CPU service from blocked I/O intervals:
+- **Wall-Clock Definition of Latency / Turnaround**: $\text{TAT}_i = t_{\text{final\_exit}}(i) - t_{\text{arrival}}(i)$ always spans from submission to completion—naturally absorbing any self-induced `Blocked` I/O gaps (such as $P_2$'s $4\text{ ms}$ I/O during $[5, 9]$) alongside ready-queue waiting time and CPU execution.
+- **Event-Ordering Sensitivity**: In deterministic discrete-event simulation at $q=1\text{ ms}$, simultaneous queue insertions at integer tick $t$ (newly arriving job vs. I/O wakeup vs. time-slice-expired thread) determine exact tie-breaking order—though conservation of total CPU work ($\sum \text{burst}_i = 13\text{ ms}$ with zero CPU idle gaps) strictly bounds aggregate completion time.
 
 ---
 
@@ -550,11 +530,9 @@ Watch out for a common exam pitfall: on the scanned paper, a student ticked `c. 
   - CFS fixed this by cleanly tracking exact virtual CPU time (`vruntime`) so every runnable process—especially newly woken interactive tasks with low `vruntime`—gets fair, predictable latency without heuristic guesswork.
 
 #### IN DETAIL
-Why did Linux throw away the super-fast "$O(1)$ scheduler"?
-- Look carefully at the options:
-  - **a** is the *opposite* of $O(1)$—the $O(1)$ scheduler got its name specifically because picking a task took constant $O(1)$ time regardless of load! (CFS is actually $O(\log N)$!)
-  - **b** isn't the primary bug—$O(1)$ swapped the `active` and `expired` arrays cleanly once `active` emptied, so tasks eventually ran.
-  - **c** was the real pain point! To keep mice/keyboards/audio snappy, the $O(1)$ scheduler contained hundreds of lines of messy guesswork trying to reward "sleepy" interactive jobs. Certain interactive patterns fooled the heuristic, dumping them into the `expired` queue behind CPU hogs for unpredictable stretches! **CFS** threw out all those heuristics in favor of one elegant rule: *track `vruntime` in a red-black tree and always run whoever received the least CPU time so far!*
+Replacing the Linux **$O(1)$ Scheduler** with the **Completely Fair Scheduler (CFS)** eliminated fragile interactivity heuristics in favor of mathematically explicit fairness:
+- **Why $O(1)$ Failed on Mixed Workloads**: Although $O(1)$ selected tasks in constant time using `active` and `expired` bitmapped priority arrays, keeping audio/UI responsive forced complex bonus/penalty heuristics estimating "sleep vs. run" time. Adversarial or atypical burst patterns misclassified interactive tasks, dropping them into the `expired` array behind heavy CPU hogs for unpredictable stalls.
+- **CFS Virtual Runtime Architecture**: CFS models an ideal multitasking CPU giving $N$ equal-weight tasks exact $1/N$ processor bandwidth simultaneously. Each task accumulates weighted virtual execution (`vruntime` += $\Delta t \cdot \frac{\text{NICE\_0\_LOAD}}{\text{weight}}$) inside a **Red-Black Tree** ($O(\log N)$ operations), always dispatching the leftmost node (lowest `vruntime`). Comparing unsigned wraparound via signed differences (`(s64)(a->vruntime - b->vruntime) < 0`) handles 64-bit counter wrap cleanly across centuries of continuous uptime.
 
 ---
 
@@ -576,9 +554,9 @@ Why did Linux throw away the super-fast "$O(1)$ scheduler"?
 - **d. RR and SJF**: **Disjoint / Neither includes the other** (independent sets in general). RR uses a time quantum ignoring job lengths, while SJF orders by burst length without time-slicing. *(Note: On trivial degenerate cases—such as a single process or all equal bursts with $q \ge \text{burst}$—both can yield the same schedule, but in general neither algorithm family can simulate the other.)*
 
 #### IN DETAIL
-This classic Silberschatz textbook question tests whether you recognize **Priority** and **MLFQ** as universal "super-frameworks":
-- **Priority** lets you plug in *any* key to pick who runs next: plug in `1 / burst_time` and you get **SJF**; plug in `-arrival_time` and you get **FCFS**!
-- **MLFQ** lets you configure $k$ queues with any scheduling rule inside each: set $k = 1$ queue running FIFO and you instantly recover **FCFS** (and set $k = 1$ with quantum $q$ and you recover **RR**)!
-- **RR vs. SJF** have completely different axes: RR slices by **clock time** without knowing job durations, whereas SJF sorts by **job duration** without slicing by clock time—so neither can mimic the other across arbitrary workloads!
+Classifying scheduling algorithms by **reduction / subset equivalence** reveals which frameworks subsume others purely through parameter configuration:
+- **Universal Frameworks**: **Priority Scheduling** strictly subsumes **FCFS** (assign priority = $-\text{arrival\_time}$) and **SJF** (assign priority = $1 / \text{next\_CPU\_burst}$). Similarly, **MLFQ** with $k=1$ single non-preemptive FIFO queue reduces identically to **FCFS**.
+- **Incompatible Primitives (RR vs. SJF)**: Round Robin is strictly preemptive and purely **burst-agnostic** (time-slicing every $q$ ms regardless of remaining CPU need), whereas non-preemptive SJF uses **a priori burst estimates** without any timer-quantum slicing—making neither a valid parameterization of the other across arbitrary job streams.
 
 ---
+

@@ -17,7 +17,7 @@
 6. [Role of the Short-Term Scheduler (CPU Scheduler / Dispatcher)](#6-role-of-the-short-term-scheduler-cpu-scheduler-dispatcher-frequency-1) — Frequency: 1
 7. [Medium-Term Scheduler (Swapper): Purpose & Issues If Omitted](#7-medium-term-scheduler-swapper-purpose-issues-if-omitted-frequency-3) — **Frequency: 3**
 8. [Strengths & Weaknesses of Shared Memory vs. Message Passing IPC Models](#8-strengths-weaknesses-of-shared-memory-vs-message-passing-ipc-models-frequency-1) — Frequency: 1
-9. [IndixOS Process IPC Design: Shared Memory vs. Message Passing](#9-indixos-process-ipc-design-shared-memory-vs-message-passing-frequency-1) — Frequency: 1
+9. [IndixOS Preemptive Multitasking: Hardware Timer Interrupt & Context-Switch Protocol](#9-indixos-preemptive-multitasking-hardware-timer-interrupt-context-switch-protocol-frequency-1) — Frequency: 1
 10. [Merits & Demerits of Synchronous (Blocking) vs. Asynchronous (Non-Blocking) IPC](#10-merits-demerits-of-synchronous-blocking-vs-asynchronous-non-blocking-ipc-frequency-1) — Frequency: 1
 11. [How Multithreading Exploits Multiprocessor Systems](#11-how-multithreading-exploits-multiprocessor-systems-frequency-1) — Frequency: 1
 12. [Does Multithreading Improve Both Concurrency and Parallelism on Multicore Systems?](#12-does-multithreading-improve-both-concurrency-and-parallelism-on-multicore-systems-frequency-1) — Frequency: 1
@@ -25,7 +25,7 @@
 14. [Concept and Purpose of Thread Pools](#14-concept-and-purpose-of-thread-pools-frequency-2) — **Frequency: 2**
 15. [T/F: "The Notion of 'Thread Pools' Is Employed to Control MPL"](#15-tf-the-notion-of-thread-pools-is-employed-to-control-mpl-frequency-1) — Frequency: 1
 16. [Why a Real-Time User-Level Thread Must Be Bound to a Kernel LWP](#16-why-a-real-time-user-level-thread-must-be-bound-to-a-kernel-lwp-frequency-1) — Frequency: 1
-17. [Design Choice: When to Use Multiple Processes vs. Multiple Threads](#17-design-choice-when-to-use-multiple-processes-vs-multiple-threads-frequency-1) — Frequency: 1
+17. [Design Choice: Spinlock vs. Blocking Semaphore Selection](#17-design-choice-spinlock-vs-blocking-semaphore-selection-frequency-1) — Frequency: 1
 
 ---
 
@@ -42,8 +42,9 @@
   - Formalizing the **process** abstraction allowed the OS to cleanly track each running program's independent state (PCB), pause/resume execution via context switching, enforce memory/resource protection, and allocate CPU/I/O resources fairly.
 
 #### IN DETAIL
-A `.exe` or compiled binary on your SSD is just a **recipe book** sitting passively on a shelf (**a program**). The moment you actually start cooking it, **a process** is born: you now have a live cook tracking *which line of the recipe they're on* (`PC`), ingredients on the counter (`Heap/Data`), scratchpad notes (`Stack`), and a clipboard for the kitchen manager (`PCB`)!
-Without the **process** abstraction, an OS running 50 concurrent tasks on 4 CPU cores would have no clean unit of **isolation**, **resource ownership**, or **pausing/resuming**!
+An OS distinguishes strictly between a **static program** and a **dynamic process**:
+- **Passive Program vs. Active Execution Context**: A compiled binary on secondary storage consists only of immutable ELF headers, `.text` machine opcodes, and initialized `.data`. A **process** binds that image to runtime hardware resources: a virtual address space (`code, data, heap, stack`), processor execution state (`PC, SP, general registers, flags` saved inside its **Process Control Block — PCB**), open file descriptor tables, and signal masks.
+- **Architectural Motivation**: Early batch systems executed one raw job directly on physical hardware with zero isolation. Introducing the process abstraction enabled hardware-isolated time-sharing, independent failure containment, and standardized resource accounting by giving every executing task its own virtual CPU and virtual memory domain.
 
 ---
 
@@ -62,12 +63,9 @@ To run `fwc file.txt` without terminating or overwriting the shell process itsel
 4. **Wait for Completion (`wait()`)**: Inside the parent shell (`pid > 0`), the shell calls `wait()` to pause until the child finishes executing, then prints the next shell prompt.
 
 #### IN DETAIL
-Why doesn't the shell just call `execute("fwc")` directly? Because `execute()` (`exec()`) **completely overwrites** the calling process's code, data, and stack! If the shell ran `execute()` itself, the shell would vanish forever the moment `fwc` finished!
-
-Instead, UNIX uses a three-step dance:
-1. **`repl()` (`fork()`)** clones the shell into a disposable child copy.
-2. **Child calls `execute("fwc", ...)`**: Only the *child* gets replaced by the word-counting program, runs, prints `20`, and dies.
-3. **Parent shell calls `wait()`**: The real shell naps politely until the child finishes (keeping terminal I/O tidy) and then wakes up ready for your next command!
+UNIX splits process creation (`fork()` / `repl()`) from program replacement (`exec()` / `execute()`) so parent processes can manipulate the child's execution environment before launching new code:
+- **Structural Separation**: `fork()` clones the parent's PCB, virtual page mappings (efficiently via **Copy-on-Write**), and open file descriptor table, returning `0` in the child and child PID in the parent. `exec()` preserves the existing PID and open file descriptors (unless marked `FD_CLOEXEC`) while completely overwriting the calling process's virtual memory segments with the target binary.
+- **Why Shells Need Both**: Had `exec()` been called directly in the shell without `fork()`, the shell binary itself would be erased upon completion of one command. Calling `exec()` only inside the freshly forked child lets the shell set up I/O redirection (`dup2()`), pipes (`pipe()`), signal handlers, and `uid`/`cwd` changes prior to executing the target binary while waiting via `waitpid()`.
 
 ---
 
@@ -87,11 +85,9 @@ Instead, UNIX uses a three-step dance:
   3. **No Convoy Effect or Starvation**: Avoids FCFS's convoy effect on I/O-bound jobs, improves turnaround over plain Round Robin, and uses **periodic priority boost (aging)** to prevent starvation of CPU-bound jobs.
 
 #### IN DETAIL
-Why not the other three?
-- **b. FCFS**: Terrible convoy effect—one CPU hog freezes all I/O-bound jobs behind it!
-- **c. Round Robin**: Gives equal slices to everyone—great response time, **bad turnaround time** because short jobs keep getting stuck behind long CPU jobs at the same queue level!
-- **d. STCF**: Optimal *if* you have a crystal ball telling you exact completion times ahead of time—impossible in a real general-purpose OS!
-- **a. MLFQ**: The real-world winner! It guesses *"short burst = interactive/I/O-bound"* by observing behavior dynamically, keeping interactive tasks snappy at the top while letting batch work run smoothly at the bottom (with periodic priority boosts so nothing starves!).
+Choosing a CPU scheduler when switching seamlessly among heterogeneous unknown processes highlights why **Multi-Level Feedback Queues (MLFQ)** dominate general-purpose OS design:
+- **Limitations of Alternatives**: **FCFS** is non-preemptive and suffers severe convoy effects when long CPU bursts precede short interactive tasks. **SCTF / SJF** requires knowing exact future CPU-burst lengths in advance, which is unobtainable for arbitrary live workloads. Fixed **Round Robin** prevents starvation but treats short interactive latency-sensitive tasks identically to background CPU hogs.
+- **MLFQ Adaptive Mechanism**: MLFQ maintains $k$ priority queues with progressively larger quanta at lower tiers. New and I/O-blocking tasks remain in top high-priority queues (achieving low interactive response time), whereas CPU-intensive processes consuming full quanta are dynamically demoted to lower queues (preventing frequent preemption overhead), with periodic priority boost (aging) eliminating lower-tier starvation.
 
 ---
 
@@ -107,9 +103,9 @@ Why not the other three?
   - **Exits Waiting Queue**: When the awaited event completes (e.g., disk interrupt arrives or semaphore is signaled), the OS transitions the process from the waiting queue back to the **ready queue**.
 
 #### IN DETAIL
-Trace a process through a quick restaurant analogy:
-- **Ready Queue** = Customers holding menus who are **100% ready to order** as soon as the cashier (`CPU`) is free.
-- **Waiting Queue** = Customers who already placed an order and are sitting at tables **waiting for their food (`I/O event`) to finish cooking**. Even if the cashier has zero customers at the counter, a customer waiting on food cannot order again until the kitchen dings the bell (**interrupt**), sending them back to the Ready Queue!
+Process scheduling relies on distinct OS kernel queues—implemented via intrusive linked pointers inside Process Control Blocks (PCBs)—to separate **runnable CPU contention** from **asynchronous resource waiting**:
+- **Ready Queue (Single or Per-Core)**: Holds PCBs in the `READY` state whose memory mappings are active and whose only prerequisite to execute is CPU availability. Dispatched purely by the Short-Term Scheduler.
+- **Waiting / Blocked Queues (Per-Event / Per-Device)**: Held separately per I/O controller, mutex, semaphore, or condition variable. Moving blocked processes out of the Ready Queue ensures the Short-Term Scheduler wastes zero cycles scanning unrunnable processes; when an ISR signals event completion, the OS moves the specific PCB back to the Ready Queue (`Blocked -> Ready`).
 
 ---
 
@@ -128,13 +124,9 @@ Trace a process through a quick restaurant analogy:
   3. **Execution Frequency**: Executes infrequently (seconds or minutes apart, only when a job arrives or terminates), so it can afford more complex selection logic.
 
 #### IN DETAIL
-Picture a popular restaurant:
-- **Long-Term Scheduler (The Host at the Front Door)**: Controls how many people are allowed inside the restaurant (**degree of multiprogramming**). If too few are let in, tables sit empty (underutilized CPU). If too many crowd in, waiters can't move (thrashing / memory overload). And a smart host tries to seat both fast-eating diners (**I/O-bound**) and slow-course diners (**CPU-bound**) so the kitchen and waitstaff stay evenly busy.
-- Compare this to:
-  - **Short-Term Scheduler (CPU Scheduler)**: Runs every few milliseconds to pick *which ready process in RAM* runs on the CPU next.
-  - **Medium-Term Scheduler (Swapper)**: Temporarily swaps already-admitted processes out to disk and back in to adjust the mix or free RAM.
-
-*(Note: Many modern time-sharing OSes like desktop Linux/Windows do not use a strict long-term scheduler—they admit all started processes directly and rely on memory limits / medium-term swapping.)*
+The **Long-Term Scheduler (Job Scheduler)** acts as the coarse-grained admission-control gate between secondary spool storage (`NEW` state) and resident multiprogramming (`READY` state):
+- **Controlling Degree of Multiprogramming ($N$)**: By capping how many active processes enter DRAM concurrently, it guarantees sufficient resident physical frames per process so page-fault rates remain low and CPU utilization stays high.
+- **Workload Mix Balancing**: Admitting exclusively CPU-bound jobs leaves disk/network DMA engines idle, while admitting exclusively I/O-bound jobs leaves the CPU starved for compute work; the Long-Term Scheduler maintains an interleaved mix of both so hardware pipelines stay balanced over long time horizons.
 
 ---
 
@@ -150,10 +142,10 @@ Picture a popular restaurant:
   3. **Policy Goal**: Directly governs CPU utilization, response time, turnaround time, and fairness across ready processes.
 
 #### IN DETAIL
-Compare the **three schedulers**:
-- **Long-Term Scheduler** decides *who gets admitted from disk into RAM* (runs every few minutes).
-- **Medium-Term Scheduler** decides *who gets swapped out/in* to balance RAM & process mix (runs every few seconds).
-- **Short-Term Scheduler** is the sprinter running every **1–10 milliseconds**: it picks the very next ready process in RAM to put onto the CPU! If the Short-Term Scheduler took even 2 ms to decide, you'd waste 20% of the CPU just picking who runs! That's why it has to be blazingly fast.
+The three classical OS schedulers form a clear **time-scale hierarchy**:
+- **Long-Term Scheduler** (seconds to minutes): Controls overall **process admission** from disk spool into RAM, shaping the static degree of multiprogramming and coarse CPU/I/O workload mix.
+- **Medium-Term Scheduler** (hundreds of milliseconds to seconds): Performs **dynamic swapping** (`suspend/resume`) to temporarily evict memory-heavy processes during acute RAM pressure and break thrashing spirals.
+- **Short-Term Scheduler / Dispatcher** (milliseconds to microseconds): Selects the next runnable PCB from the in-memory **Ready Queue** on every timer tick, blocking syscall, or wakeup interrupt, switching hardware address spaces (`CR3`) and CPU register state via sub-millisecond context switches.
 
 ---
 
@@ -181,11 +173,9 @@ Without a **medium-term scheduler** (swapping), an operating system suffers from
 4. **Poor System Throughput & Response Time**: Overcommitted memory and skewed queues lower overall hardware utilization and stall interactive jobs.
 
 #### IN DETAIL
-Without a medium-term scheduler, once a process enters RAM via the long-term scheduler, **the ONLY way it ever leaves RAM is by terminating!**
-Think what goes wrong on a real system:
-- Ten idle browser tabs or suspended jobs hog 95% of RAM forever while active jobs starve and **thrash**!
-- Or 5 jobs all enter an intense CPU-crunching phase at once, leaving the disk completely idle, while an I/O job sits locked outside RAM!
-The medium-term scheduler solves both by temporarily **suspending and swapping out** selected processes to disk, then swapping them back in cleanly when RAM frees up or the mix needs rebalancing!
+Without a **Medium-Term Scheduler (Swapper)**, admission control becomes irreversible once a process enters physical memory:
+- **Dynamic Working-Set Oversubscription**: Even if the Long-Term Scheduler picks a sensible initial multiprogramming level $N$, processes dynamically allocate heap memory (`brk`/`mmap`), expanding their aggregate working-set footprint beyond available DRAM frames.
+- **System Failure Modes**: Without the ability to suspend active processes cleanly to backing swap storage (`Ready/Blocked -> Ready-Suspended/Blocked-Suspended`), page replacement degrades into global **thrashing**—CPU utilization collapses while disk paging saturates—and blocked long-idle processes permanently lock physical frames away from active workloads.
 
 ---
 
@@ -204,13 +194,13 @@ The medium-term scheduler solves both by temporarily **suspending and swapping o
 | **Weaknesses** | 1. **Synchronization Burden**: Programmers must explicitly synchronize access (locks/semaphores) to prevent race conditions.<br>2. **Single-Machine Only**: Does not natively work over networks. | 1. **Higher Overhead**: Every message incurs system calls (mode switches) and copying between user and kernel space.<br>2. **Lower Bandwidth** for very large frequent data transfers. |
 
 #### IN DETAIL
-Imagine two coworkers collaborating in an office:
-- **Shared Memory** is like putting a **shared whiteboard** between their desks. Once the manager (OS) sets up the whiteboard, both workers can write and read directly at lightning speed without asking the manager each time. **Catch**: If both grab the same marker or write over each other's numbers at the same time, chaos happens! So they must strictly coordinate turns (mutexes/semaphores), and they must be in the *same room* (same physical machine).
-- **Message Passing** is like **sending sealed memos** through an office courier (the OS kernel). It's slower because every memo requires handing it to the courier (`send()` system call) and copying it to the recipient's inbox (`receive()`). **Advantage**: Nobody overwrites anyone else's desk, there are no shared-state corruption bugs, and the courier works just as well if the coworker is in another building (across a network!).
+**Shared Memory** and **Message Passing** present an architectural tradeoff between raw throughput and kernel-enforced isolation:
+- **Shared Memory Architecture**: Two or more processes ask the OS kernel (`shm_open` + `mmap`) to map identical physical RAM frames into each process's virtual page tables. After setup, communication executes at **full DRAM memory speed** without kernel traps or buffer copies; however, correctness falls entirely on user-space synchronization primitives (mutexes, atomics, memory barriers) to prevent data races.
+- **Message Passing Architecture**: Every communication invokes explicit kernel traps (`send()`/`recv()`, pipes, sockets) where the kernel copies payload data into protected kernel buffers and across address-space boundaries. Although syscalls and copies add per-message overhead, the kernel enforces implicit synchronization, boundary safety, and seamless extension across distributed nodes where physical memory is not shared.
 
 ---
 
-### 9. IndixOS Process IPC Design: Shared Memory vs. Message Passing [Frequency: 1]
+### 9. IndixOS Preemptive Multitasking: Hardware Timer Interrupt & Context-Switch Protocol [Frequency: 1]
 
 > **Question**: At any given point, there will be many processes executing in the IndixOS. At present, the team relies on the cooperative approach to pass control back to the OS. However, the team is unclear about how a pre-emptive approach can be implemented to get control back to the OS during process execution... The team requires your suggestion based on your understanding of Unix about the mechanism and protocol that the OS needs to use to ensure that it can seamlessly switch between multiple processes.
 
@@ -229,10 +219,9 @@ To switch from cooperative to **preemptive multitasking**, IndixOS needs two coo
    - The **CPU Scheduler** selects Process C from the `READY` queue, loads C's saved registers and **Page Table base register** (e.g., `CR3`) from C's PCB, and executes a **return-from-interrupt** (`iret`/`sysret`) switching back to User Mode to resume C seamlessly.
 
 #### IN DETAIL
-Think of **cooperative multitasking** like relying on speakers at a conference to voluntarily pass the microphone—if one speaker gets stuck in an infinite `while(1)` loop, nobody else ever speaks!
-**Preemption** installs an automated stage alarm (**hardware timer**) wired directly to the soundboard (**CPU hardware + IVT**):
-1. Every 10 ms, the alarm rings (**timer interrupt**). Process B has *zero say* in the matter—the CPU immediately switches to Kernel Mode and runs the OS handler.
-2. **Context Switch**: Think of pausing a video game—save every register, stack pointer, and memory map pointer of Process B into its **PCB save file**, load Process C's **PCB save file**, switch back to User Mode, and Process C resumes without ever realizing it was paused!
+Implementing **preemptive multitasking** removes reliance on cooperative user-space `yield()` behavior, guaranteeing the OS kernel regains hardware control reliably even if user tasks enter infinite loops:
+- **Protected Hardware Timer & IVT Hook**: During boot, the kernel configures a programmable hardware timer (e.g., LAPIC timer / PIT) to raise periodic interrupts every quantum $q$, registering the OS Timer ISR inside the hardware Interrupt Vector Table (IVT). Marking timer-control instructions/MMIO registers privileged ensures user processes can never mask or reprogram the preemption clock.
+- **Atomic Trap & Context Switch Protocol**: On timer expiration, CPU hardware atomically saves minimal hardware state (`PC, SP, PSW/EFLAGS`) onto the kernel stack, transitions from User Mode (`Ring 3`) to Kernel Mode (`Ring 0`), and branches to the Timer ISR. The ISR saves remaining general-purpose registers into the running process's PCB, calls the Short-Term Scheduler to pick the next Ready PCB, reloads `CR3` (if switching address spaces) and the new process's saved registers, and executes `iret`/`sysret` back into User Mode.
 
 ---
 
@@ -252,9 +241,9 @@ Think of **cooperative multitasking** like relying on speakers at a conference t
    - *Demerits*: Requires OS kernel memory buffers (queues can overflow under fast producers), complicates error handling/delivery confirmation, and requires extra polling/callbacks to check completion.
 
 #### IN DETAIL
-Think of **phone call (Synchronous)** vs. **text message / email (Asynchronous)**:
-- On a **phone call (`blocking send/receive`)**, both people synchronize directly (*rendezvous*), and you know instantly they heard you—no inbox queue needed! **Catch**: if the other person doesn't pick up, you just sit stuck holding the phone doing nothing!
-- With a **text message (`non-blocking send`)**, you fire off the message into the carrier's queue and immediately move on with your day (**higher concurrency!**)—at the cost that the carrier must maintain message storage buffers and you don't know immediately if/when they read it!
+Synchronous vs. asynchronous IPC reflects fundamentally different **control-flow coupling** and **kernel buffering** assumptions:
+- **Synchronous (Blocking Send/Receive)**: Enforces a strict **rendezvous**—whichever endpoint arrives early suspends in a kernel wait queue until its peer executes the matching operation. This bounds intermediate kernel buffer usage to zero (direct copy from sender space to receiver space once matched) and simplifies ordering proofs, at the cost of reduced pipeline concurrency and vulnerability to deadlock if circular dependencies arise.
+- **Asynchronous (Non-Blocking Send / Buffered Queues)**: Decouples execution rates by introducing bounded kernel FIFO message queues. Senders immediately resume execution after enqueuing, improving producer–consumer throughput; however, kernel memory must be allocated and bounded carefully—requiring explicit flow-control backpressure (blocking or `EAGAIN` errors) if consumers lag indefinitely.
 
 ---
 
@@ -269,9 +258,9 @@ Think of **phone call (Synchronous)** vs. **text message / email (Asynchronous)*
   2. On a multiprocessor/multicore system, the OS schedules different threads of the *same* process onto **separate CPU cores simultaneously** (true parallelism), achieving significant speedup with much lower creation and context-switch overhead than spawning heavyweight processes.
 
 #### IN DETAIL
-Suppose you have a massive video file to encode on an 8-core laptop:
-- A classic **single-threaded process** can only ever run on **1 core** at a time (using just 12.5% of your CPU!). The other 7 cores can't touch that single thread's instruction stream.
-- A **multithreaded** video encoder splits the work into 8 threads inside the same process (sharing the video buffer in RAM with zero IPC copying!). The OS drops Thread 1 onto Core 0, Thread 2 onto Core 1, ..., Thread 8 onto Core 7—finishing the task up to ~8× faster!
+Multithreading unlocks parallel scalability on multicore/multiprocessor hardware without duplicating heavy per-process OS structures:
+- **Single-Threaded Limit**: Because a traditional process owns only **one hardware execution context** (`PC, SP, register file`), the OS scheduler can dispatch it onto at most **one CPU core** at any single instant; all extra cores remain unused by that application unless multiple heavyweight processes are spawned and linked via slower IPC.
+- **Multi-Core Thread Dispatching**: Because threads within one process share the same virtual address space (page tables, heap, `.data`, open file descriptors) while maintaining independent **Thread Control Blocks (TCBs)**, stacks, and register contexts, the OS kernel scheduler assigns distinct runnable kernel threads concurrently to separate physical cores—performing true parallel computation over shared heap data with minimal inter-thread communication cost and zero TLB flush overhead.
 
 ---
 
@@ -289,9 +278,9 @@ Suppose you have a massive video file to encode on an 8-core laptop:
   2. **Improved Parallelism**: Unlike a single-threaded process (which can execute on at most **one** CPU core at any instant), a multithreaded process exposes multiple independent instruction streams that the OS kernel can schedule onto **different CPU cores simultaneously**, achieving true parallel speedup.
 
 #### IN DETAIL
-Consider a web server or modern text editor (like MS Word):
-- On a **single-core CPU**, multithreading still gives **concurrency**: while Thread 1 waits for a disk save, Thread 2 keeps accepting your keystrokes, and Thread 3 checks spelling by taking rapid turns on that one core.
-- On a **multicore CPU** (say 4 cores), a traditional single-threaded process is stuck using only 1 core (25% of the machine's CPU power!). With **multithreading**, the OS puts Thread 1 on Core 0, Thread 2 on Core 1, Thread 3 on Core 2, and Thread 4 on Core 3 **at the exact same nanosecond**. So you get *both* responsive overlapping structure (concurrency) and true multi-core simultaneous computation (parallelism).
+**Concurrency** and **parallelism** address orthogonal execution dimensions, and multithreading strengthens both on multicore hardware:
+- **Improved Concurrency (Logical Structural Decoupling)**: Separating logically independent activities (UI event loop, network socket reader, disk flusher, worker compute) into distinct threads lets an application keep making progress whenever individual threads block on I/O—even on a single core via OS time-slicing.
+- **Improved Parallelism (Simultaneous Hardware Execution)**: On multicore processors, those concurrent threads map directly onto independent CPU cores simultaneously (`T1` on Core 0, `T2` on Core 1), reducing wall-clock execution latency roughly proportionally to core count for parallelizable workloads (modulo synchronization and Amdahl's serial fraction).
 
 ---
 
@@ -314,10 +303,10 @@ Consider a web server or modern text editor (like MS Word):
   - **High CPU Utilization & Resilience to Blocking (Optimal)**: If one kernel thread blocks on I/O, another runnable kernel thread is immediately scheduled onto that freed CPU core, keeping all $P$ processors saturated while multiple user threads efficiently multiplex over the $K$ kernel threads without excessive kernel-thread overhead.
 
 #### IN DETAIL
-Think of **processors ($P=4$)** as 4 factory machines, **kernel threads ($K$)** as licensed machine operators, and **user threads ($U=20$)** as tasks to perform:
-- **(i) $K = 2 < 4$**: Only 2 operators exist, so 2 machines gather dust permanently!
-- **(ii) $K = 4 = 4$**: All 4 machines stay busy *until* one operator steps away to wait on a delivery truck (**blocking syscall**)—leaving Machine #4 sitting empty while 16 tasks wait in line!
-- **(iii) $K = 8$ ($4 < 8 < 20$)**: You have 8 operators for 4 machines! Whenever one operator waits on a delivery truck, one of the spare operators immediately steps onto Machine #4—keeping all 4 machines humming near **100% utilization**, without paying the memory cost of hiring 20 separate kernel-level operators!
+Under the **Many-to-Many (`M:N`)** threading architecture, execution concurrency spans two decoupled scheduling layers: user-space threads ($U$) multiplexed by a runtime library onto Kernel-Schedulable Entities / LWPs ($K$), which the OS schedules onto physical processors ($P$):
+- **$K < P$ (Kernel-Thread Bottleneck)**: The OS kernel perceives only $K$ dispatchable execution contexts, leaving at least $P - K$ CPU cores idle regardless of how many $U$ user threads are runnable.
+- **$K = P$ (Saturated Optimal Mapping for Pure Compute)**: Every core can execute one thread concurrently without excess kernel context switches, provided none of the $K$ LWPs block in synchronous syscalls.
+- **$P < K < U$ (Resilience to Blocking Syscalls)**: Having surplus kernel threads ($K > P$) guarantees that if one or more LWPs block inside kernel I/O, the OS seamlessly schedules alternate ready LWPs onto freed cores, maintaining full $P$-way core utilization at modest extra kernel TCB overhead.
 
 ---
 
@@ -333,12 +322,9 @@ A **thread pool** pre-creates a bounded number of worker threads at startup that
 3. **Predictable Performance & Graceful Degradation**: When all pool threads are busy, new requests wait cleanly in a task queue rather than crashing the system by spawning thousands of threads.
 
 #### IN DETAIL
-Imagine a busy restaurant hiring and firing a brand-new waiter every single time a customer walks in, then firing them 30 seconds later when the bill is paid! That's what spawning a new thread per request does—it wastes huge OS overhead allocating stacks and kernel structures, and during a rush hour (10,000 simultaneous requests), the restaurant runs out of space and collapses.
-
-A **thread pool** hires a fixed team of, say, 20 waiters at opening time:
-- When requests arrive, an idle thread picks up the job immediately (zero startup delay).
-- When done, the thread returns to the pool rather than dying.
-- If 500 requests arrive at once, 20 run smoothly and 480 wait politely in the request queue without crashing RAM!
+Thread pools amortize thread lifecycle costs and enforce bounded concurrency over dynamic bursty workloads:
+- **Kernel Lifecycle Amortization**: Spawning and tearing down native OS threads repeatedly per short request incurs repeated `clone()` syscalls, stack `mmap()` allocation, page-table initialization, kernel TCB setup, and scheduler enqueueing—often exceeding the compute duration of short tasks themselves. Pre-allocated worker threads reuse persistent stacks and TCBs continuously across tasks from a shared synchronization queue.
+- **Resource Exhaustion Protection**: Unbounded thread-per-request architectures under heavy traffic surges exhaust virtual/physical stack memory (`OOM`) and trigger severe scheduler context-switch thrashing; a bounded pool caps active execution contexts cleanly at an optimal core-tuned concurrency limit.
 
 ---
 
@@ -356,9 +342,9 @@ A **thread pool** hires a fixed team of, say, 20 waiters at opening time:
 - **Justification**: MPL refers to the total number of processes residing in main memory, regulated by admitting or swapping processes to avoid thrashing. Thread pools operate inside a server/process to pre-create a bounded number of reusable worker threads, preventing unbounded thread creation from exhausting CPU and memory resources.
 
 #### IN DETAIL
-Look closely at the exact terms from `MultithreadedProgramming-ch4-2025.ppt` vs `Lec7-processConcept_ch3-2025.ppt`:
-- **Thread pools** limit *how many threads* a multithreaded server spawns (so 10,000 requests don't crash RAM with 10,000 threads).
-- **MPL (Multiprogramming Level)** is the number of *processes* in main memory controlled by the OS **Long-Term / Medium-Term Scheduler**! Keep that distinction sharp on exams!
+OS terminology distinguishes strictly between **process-level** multiprogramming and **thread-level** concurrency control:
+- **Degree of Multiprogramming (MPL)**: Governed by the **Long-Term** and **Medium-Term Schedulers**, reflecting the number of distinct *processes* (separate address spaces) residing simultaneously in main memory.
+- **Thread Pool Concurrency Cap**: Operates *within a single process's address space*, fixing only the maximum number of active worker *threads* inside that application so it avoids per-request creation overhead and intra-process thread thrashing without altering OS-wide process MPL.
 
 ---
 
@@ -377,16 +363,13 @@ Look closely at the exact terms from `MultithreadedProgramming-ch4-2025.ppt` vs 
 - **With LWP Binding**: Binding dedicates an exclusive kernel thread/LWP with real-time priority (`SCHED_FIFO`/`SCHED_RR`) directly to that thread, ensuring immediate kernel preemption and deterministic scheduling.
 
 #### IN DETAIL
-Think of **LWPs** as airport VIP shuttle vans, and **unbound user threads** as passengers sharing a common pool of 4 shuttle vans:
-- Normally, sharing 4 vans among 50 passengers is super efficient.
-- Now imagine an **ambulance patient (Real-Time Thread)**! If you put the ambulance patient in the shared waiting lounge without assigning a dedicated van:
-  1. Air traffic / traffic cops (**the OS Kernel**) only see 4 generic vans—they have **no idea** an urgent emergency patient is sitting inside the lounge!
-  2. If all 4 vans are stuck in traffic (**blocked on disk syscalls**) or carrying normal tourists, the real-time patient misses its deadline and dies!
-- **Binding the real-time thread to its own dedicated LWP** gives the ambulance its own dedicated vehicle with flashing sirens visible directly to the kernel scheduler!
+In a **Two-Level (`M:N` + Bound)** threading model, an OS kernel schedules only **LWPs / Kernel Threads**, remaining completely blind to multiplex rules running inside user-space thread libraries:
+- **Hazards of Unbound Multiplexing for Real-Time Work**: An unbound real-time user thread faces two failure modes: (1) it can be preempted or starved inside user space when all pooled LWPs block on synchronous syscalls or run other lower-priority user tasks; and (2) the OS kernel cannot apply hard real-time scheduling classes (`SCHED_FIFO`/`SCHED_RR`) or global real-time priority inheritance directly to user threads it cannot distinguish.
+- **Role of Dedicated Binding**: Binding a critical thread **1-to-1 to a dedicated LWP** guarantees continuous kernel visibility, isolated kernel scheduling priority, and direct preemption safety on physical CPU cores.
 
 ---
 
-### 17. Design Choice: When to Use Multiple Processes vs. Multiple Threads [Frequency: 1]
+### 17. Design Choice: Spinlock vs. Blocking Semaphore Selection [Frequency: 1]
 
 > **Question**: When developing an application, how do you decide whether you should employ "spinlock" or "semaphore"?
 
@@ -402,8 +385,10 @@ The choice depends on **expected lock-hold duration** and **processor architectu
    - **Condition Signaling / Counting Resources** (e.g., Producer–Consumer bounded buffers).
 
 #### IN DETAIL
-Think of waiting for a coworker to finish using the office printer:
-- If they're just grabbing **1 sheet already printed** (takes 2 seconds $\implies$ **short critical section**), walking all the way back to your desk, sitting down, opening your laptop, and walking back later (**2 context switches**) wastes way more time than standing there for 2 seconds (**spinlock**)!
-- If they're printing a **500-page textbook** (takes 20 minutes $\implies$ **long critical section**), standing there staring at the printer (**spinlock**) wastes 20 minutes of your work—go back to your desk and let them ping you when done (**blocking semaphore**)!
+*(Heading aligns with actual question content: **Design Choice: Spinlock vs. Blocking Semaphore Selection**.)*
+Spinlocks and blocking semaphores differ fundamentally in how waiting threads consume processor cycles relative to expected lock hold duration:
+- **Spinlock Break-Even Economics ($T_{\text{hold}} < 2 \cdot T_{\text{ctx}}$)**: A spinlock executes a tight atomic test-and-set loop (`while (TAS(&lock))`), staying scheduled on its CPU core. If the lock holder is running concurrently on another physical core and holds the lock for nanoseconds, spinning avoids **two expensive OS context switches** (voluntary block + wakeup reschedule, typically microseconds). However, on a **single-core CPU**, spinning is catastrophic—the spinning waiter burns its entire quantum preventing the preempted lock holder from ever running to unlock (`priority inversion / live-hang`). Moreover, under heavy multicore contention, spinning generates sustained **cache-line invalidation traffic** over the shared memory bus.
+- **Blocking Semaphore Semantics**: When locks guard long operations (disk I/O, bulk allocations, contended queues), semaphores suspend the caller onto a kernel wait queue (`Blocked` state), immediately freeing the CPU core for other runnable work while also supporting counting resources and cross-thread condition signaling.
 
 ---
+

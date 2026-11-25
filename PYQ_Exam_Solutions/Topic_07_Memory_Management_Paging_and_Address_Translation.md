@@ -40,8 +40,9 @@
   - The OS can load $P_d$ into **any** available memory space (or even dynamically allocate/grow heap/stack or non-contiguous frames on demand), allowing $P_d$ to execute without difficulty.
 
 #### IN DETAIL
-Imagine printing a theater ticket with a permanent rule *"You MUST sit in Row 3, Seat 5"* (**static absolute binding** for $P_s$). Even if the theater has 99 empty seats in Rows 1, 2, and 4, if one person is sitting in Row 3 Seat 5, you get turned away at the door!
-Meanwhile, $P_d$ gets a **general-admission relocatable ticket** (*"Seat = Base + Offset"*). The usher (OS + hardware MMU/base register) seats $P_d$ in *any* empty block—and with dynamic allocation/virtual memory, it doesn't even have to reserve max worst-case memory upfront!
+Address binding stage determines whether an executable image is permanently anchored to specific physical DRAM addresses or dynamically relocatable at load/run time:
+- **Static / Compile-Time Absolute Binding ($P_s$)**: Emits literal physical addresses directly into machine instructions (loads, stores, branch targets). Loading $P_s$ at any non-identical base frame shifts every embedded target address out of alignment—causing spatial collisions with concurrently loaded processes whenever its preassigned physical region is occupied.
+- **Dynamic / Execution-Time Binding ($P_d$)**: Emits zero-based logical addresses translated on every memory reference via MMU relocation hardware (`Base + Limit` registers or Page Tables). Because logical-to-physical decoupling occurs purely at hardware lookup time, $P_d$ loads into arbitrary free frames without code patching and can even migrate safely during execution.
 
 ---
 
@@ -57,8 +58,9 @@ Meanwhile, $P_d$ gets a **general-admission relocatable ticket** (*"Seat = Base 
 | **OS Support Needed** | **No special OS support required**—can be implemented entirely by the user/program design. | **Requires OS/dynamic-loader support** (e.g., stub resolution, shared memory/code page mapping across processes). |
 
 #### IN DETAIL
-- **Dynamic Loading** is like keeping your rarely used winter coat in storage until it actually snows—your single suitcase (**process RAM**) stays small because error-handling routines that never execute never get loaded from disk. You can code this yourself without special OS magic.
-- **Dynamic Linking** is like **100 apartments sharing one public library** instead of buying 100 personal copies of `printf()`! When your program calls `printf()`, a tiny **stub** checks if `libc.so` is already in RAM; if yes, the OS maps that *existing* shared copy straight into your address space—saving huge amounts of disk space and RAM across all running apps!
+**Dynamic Loading** and **Dynamic Linking** optimize distinct system dimensions—virtual memory footprint vs. cross-process code deduplication and library upgradability:
+- **Dynamic Loading (Application-Controlled Lazy Routine Activation)**: Separates error-handling or optional sub-routines from the main binary initialization path; routines remain in relocatable form on disk until first invoked via explicit loader calls, saving resident memory when rare execution paths never trigger (requiring zero explicit OS kernel support).
+- **Dynamic Linking & Shared Libraries (OS-Mediated Runtime Resolution)**: Defers symbol resolution of common system libraries (`libc.so`) from link time to load or first-call time (*lazy PLT/GOT binding*). Because read-only `.text` library code pages map read-execute across *every* process's page tables simultaneously, a single resident physical copy services hundreds of processes while security patches to the shared `.so` propagate transparently without relinking binaries.
 
 ---
 
@@ -95,10 +97,10 @@ Initial Holes: `[100K, 500K, 200K, 300K, 600K]`. Requests: `P1=212K`, `P2=417K`,
 - **Conclusion**: **Best-Fit** makes the most efficient use of memory for this workload because it is the **only** algorithm that successfully accommodates all four processes (`1167K` allocated out of `1700K`), whereas both First-Fit and Worst-Fit fail to place the `426K` process.
 
 #### IN DETAIL
-Let's check why **Best-Fit** won here:
-- Under **First-Fit**, `212K` grabbed the first big hole (`500K`), leaving only `600K` for `417K`—which consumed the only hole large enough for `426K` later!
-- Under **Worst-Fit**, `212K` immediately chewed up the biggest hole (`600K`), again leaving no contiguous `426K` slot at the end.
-- **Best-Fit** matched each job tightly (`212K -> 300K`, `417K -> 500K`, `112K -> 200K`), preserving the `600K` hole intact until `426K` arrived! *(Note: in general workloads over long periods, First-Fit is faster and often comparable in fragmentation because Best-Fit tends to leave tiny unusable slivers, though for this classic textbook trace Best-Fit clearly wins.)*
+Dynamic contiguous variable-partition allocation fragments physical RAM into alternating allocated blocks and free **holes**, making placement heuristics critically sensitive to request sequences:
+- **First-Fit ($O(N)$ early termination)**: Stops at the earliest sufficient hole, concentrating small unallocatable leftovers near lower memory addresses while conserving larger upper partitions for future big allocations unless early medium holes (like `500K` for `212K`) get split prematurely ahead of larger incoming segments (`417K`, `426K`).
+- **Best-Fit**: Minimizes immediate wasted space (`min(hole - size)`), maximizing successful placements for constrained multi-step sequences—at the cost of leaving behind tiny, nearly unusable **sliver fragments (external fragmentation)** that inflate search list length unless coalesced frequently.
+- **Worst-Fit**: Intentionally splits the largest remaining hole to create viable medium-sized remainders, which quickly exhausts headroom for upcoming large allocation demands.
 
 ---
 
@@ -135,11 +137,9 @@ Let's check why **Best-Fit** won here:
   5. **Physical Address**: $\texttt{0x9000} + \texttt{0x1100} = \mathbf{\texttt{0xA100}}$.
 
 #### IN DETAIL
-Watch out for the classic hex trap when splitting top 2 bits!
-People often look at the first hex digit `5` (`0101`) and forget that the top 2 bits (`01`) belong to the Segment ID while the **other 2 bits (`01`) of that `5` remain inside the offset!**
-So the offset is **`0x1100`** (NOT `0x0100`, and NOT `0x5100`!).
-- Since `0x1100` (4,352 bytes) is strictly smaller than Heap's limit `0x2000` (8,192 bytes), it does **not** cause a Segmentation Fault (note the stray pen marks on the scanned PDF circling `d`—ignore student marks!).
-- Adding Base `0x9000` + Offset `0x1100` gives **`0xA100`** (**b**)!
+Segmentation hardware splits a $k$-bit virtual address explicitly into a discrete **Segment Selector (`s`)** and **Intra-Segment Offset (`d`)**, performing parallel bounds protection before relocation:
+- **Binary Bit-Masking vs. Decimal Hex**: Hardware inspects the top $n$ most significant bits (here upper 2 bits `01` of `0x5100 = 0101_0001_0000_0000_2` $\implies s = 1$), rather than the whole leading hex nibble, extracting the remaining 14 bits (`0x1100`) as byte offset $d$.
+- **Two-Stage MMU Check**: First verifying $d < \text{Limit}[s]$ traps invalid sparse cross-segment pointers immediately (`SIGSEGV` / Segment Fault); only valid offsets add $\text{Base}[s] + d$ to produce the linear physical address, cleanly supporting independent per-segment protection flags (`R/W/X`) and variable growth directions (upward heap vs. downward stack).
 
 ---
 
@@ -160,9 +160,9 @@ So the offset is **`0x1100`** (NOT `0x0100`, and NOT `0x5100`!).
    - It constructs a **fresh Page Table** for the new executable's segments (Code/Text mapped Read-Only, Data, BSS, Heap, and a new Stack), typically using **demand paging** so code/data pages are loaded from disk into physical frames only when first referenced.
 
 #### IN DETAIL
-Think about what happened in Question 1(a): right after `repl()` cloned a 100 MB shell, the child immediately called `execute("fwc")` 1 microsecond later! If `repl()` had physically copied all 100 MB (25,600 pages) just to throw them away in `execute()`, the system would crawl!
-- **Copy-on-Write (COW)** makes `repl()` almost instant: just copy the tiny page table pointers and mark them *"Read-Only—tell the kernel if anyone writes!"*. If `execute()` runs right away, zero physical data pages were ever copied!
-- Then **`execute()`** rips up the old page table cleanly, creates a blank new virtual map pointing to `fwc`'s executable sections on disk, and lets the page-fault handler pull in pages lazily as `fwc` runs!
+Pairing **non-contiguous Paging** with **`fork()` (`repl()`)** eliminates `fork()`'s historic $O(\text{RAM})$ copy bottleneck through kernel **Copy-on-Write (CoW)** state sharing:
+- **Naive Fork Overhead Without CoW**: Cloning a parent's physical RAM frames during `fork()` wastes CPU and DRAM bandwidth whenever the child immediately calls `exec()` (`execute()`) microseconds later and discards the inherited address space.
+- **Page-Table CoW Protocol**: On `fork()`, the OS copies *only* the parent's page tables, shares the exact same underlying physical frames via reference counts, and clears the **Write-Protect (`R/W = 0`) bit** across private writable pages in both parent and child PTEs. Any subsequent store triggers a hardware protection **Page Fault**; the kernel detects the shared CoW frame (`refcount > 1`), allocates one fresh private frame, copies that single $4\text{ KB}$ page, restores `R/W = 1`, and retries the faulting instruction.
 
 ---
 
@@ -181,11 +181,9 @@ Using arbitrary **variable-sized pages and variable-sized physical blocks** unde
 *(Note: Modern CPUs only support a tiny set of fixed power-of-2 "huge page" sizes like 4 KB / 2 MB / 1 GB alongside standard 4 KB frames—not arbitrary variable sizes.)*
 
 #### IN DETAIL
-Why did OS designers invent paging in the first place? To make every chunk of memory look like identical **LEGO bricks** so **any** page fits into **any** empty frame with zero leftover gaps (**zero external fragmentation**) and so splitting a 32-bit address is just chopping off the bottom 12 bits!
-
-If you make pages and physical blocks *different arbitrary sizes*:
-- You lose fast bit-shift address translation!
-- You recreate variable-partition **external fragmentation**—you're basically reinventing **Segmentation** while calling it Paging!
+Strict equality between **virtual page size ($P$)** and **physical frame size ($F$)** is the mathematical invariant enabling $O(1)$ hardware address translation without external fragmentation:
+- **MMU Bit-Slice Arithmetic**: Fixing $P = F = 2^k$ bytes partitions every virtual address cleanly into upper page number bits ($p$) and lower pass-through byte offset bits ($d$, widths $k$ bits). The MMU swaps $p \mapsto f$ via the page table/TLB and passes $d$ verbatim without executing multi-word additions, multiplications, or bounds comparisons per page access.
+- **Fragmentation Collapse**: With uniform blocks, *every* free physical frame fits *every* virtual page interchangeably—completely eliminating **external fragmentation** (`best-fit`/`compaction` overhead), whereas variable-sized hardware pages would reintroduce variable free-list search, segment limit checks, and relocation compaction.
 
 ---
 
@@ -203,8 +201,9 @@ If you make pages and physical blocks *different arbitrary sizes*:
   - **Dramatically Reduces Effective Memory Access Time (EMAT)**: Brings average memory access latency close to a single physical memory access instead of $2\times$ (or $4\times$ with multi-level paging).
 
 #### IN DETAIL
-Imagine calling a customer support number where every time you want to ask a question, you first have to drive across town to look up their phone number in a paper phone book (**page table in RAM**), and *then* make the call (**actual data access**)—doubling or quadrupling every single memory read!
-The **TLB** is a tiny speed-dial card taped right on your phone (**MMU associative hardware cache**). If the page number is on your speed-dial (TLB Hit), you get the frame number instantly in parallel and make just **one** trip to RAM!
+Because paging separates logical and physical spaces through in-memory page tables, naive virtual address translation **doubles main-memory access latency** ($1$ DRAM read for PTE + $1$ DRAM read for target datum; worse with $3\text{--}4\times$ extra accesses in multi-level page trees):
+- **Associative Hardware Cache (TLB)**: Implemented as tiny on-chip Content-Addressable Memory (CAM) checked in parallel with L1 cache indexing ($\sim 0.5\text{--}1\text{ ns}$). Upon a hit ($\alpha \approx 98\%\text{--}99\%$), effective access time approaches raw memory latency: $\text{EAT} = \alpha(t_{\text{TLB}} + t_{\text{mem}}) + (1-\alpha)(t_{\text{TLB}} + (k+1)t_{\text{mem}})$.
+- **Context-Switch Semantics**: Unless tagged with an **Address Space Identifier (ASID / PCID)**, switching processes (`CR3` reload) invalidates non-global TLB entries to preserve cross-process isolation.
 
 ---
 
@@ -224,9 +223,9 @@ The **TLB** is a tiny speed-dial card taped right on your phone (**MMU associati
   - This cuts page-fault disk write traffic roughly in half, vastly improving virtual memory performance (and helps replacement policies like Enhanced Second Chance prefer clean victims).
 
 #### IN DETAIL
-Think of borrowing a library book (disk page) onto your study desk (RAM frame):
-- **Clean (`dirty = 0`)**: You only *read* the book without writing any notes in the margins. When your desk runs out of space, you don't need to photocopy your copy before putting it away—the library already has an identical copy, so you just toss yours onto the return cart instantly!
-- **Dirty (`dirty = 1`)**: You wrote new solutions in the book! Now if you clear your desk, you *must* save your updated pages back to the library first so your edits aren't lost. The dirty bit tells the OS instantly whether a page needs that expensive disk write!
+The hardware **Dirty (Modified) Bit (`D`)** in each Page Table Entry acts as a write-back write-amplification filter during page replacement:
+- **Zero-Overhead Hardware Tracking**: Maintained in Read-Only state initially or cleared upon frame load; whenever a CPU `store` writes through a mapped TLB/PTE entry, MMU hardware atomically latches `D = 1` directly inside the PTE without raising a trap (or via a single initial minor protection fault on architectures managing `D` in software).
+- **50% Eviction I/O Reduction**: On eviction, clean pages (`D = 0`) match their authoritative copy already intact on backing swap or executable image—requiring **zero disk writes** before immediate frame reclamation. Only dirty pages (`D = 1`) incur asynchronous swap-out disk writes prior to frame reuse.
 
 ---
 
@@ -245,10 +244,9 @@ Think of borrowing a library book (disk page) onto your study desk (RAM frame):
   2. **Difficulty Implementing Shared Memory**: Because each physical frame has only one IPT slot storing one `<PID, VPN>`, mapping a single physical frame into multiple processes' virtual address spaces simultaneously requires extra chained structures.
 
 #### IN DETAIL
-Imagine a hotel with 100 rooms (**physical frames**), and 10,000 guests who *might* reserve rooms (**virtual address spaces**):
-- **Standard Per-Process Page Table**: Every single guest carries a giant 10,000-page binder listing all possible rooms! Huge memory waste!
-- **Inverted Page Table**: The front desk keeps **one 100-line clipboard**—one line per physical room—recording *"Room #7 is occupied by Guest PID=42, Virtual Page #99."* Tiny memory footprint!
-- **Catch**: When Guest #42 asks *"Where is my Page #99?"*, you can't just jump to line 99! You have to **search** the 100-line clipboard (via a hash table + TLB cache) to find which room holds `<PID=42, VPN=99>`!
+**Inverted Page Tables (IPTs)** flip per-process virtual indexing into **single global physical-frame indexing** to constrain page-table RAM consumption on wide ($64$-bit) virtual address spaces:
+- **Space Bounded by Physical DRAM**: Traditional hierarchical page tables allocate entries proportional to mapped *virtual* memory *multiplied* by process count. An IPT contains exactly one entry per *physical frame* (`<PID, Virtual_Page#>`), bounding page-table size strictly to $\text{RAM} / P$ regardless of how many sparse $64$-bit processes run concurrently.
+- **Lookup Latency & Shared Memory Friction**: Because hardware accesses present virtual `<PID, p>`, finding its frame index requires scanning or **Hashed IPT chaining** (adding extra DRAM probes on TLB miss plus hash-table lock contention), and mapping one shared library physical frame cleanly into multiple `<PID, v_addr>` slots violates simple 1-to-1 frame-index uniqueness without auxiliary shared chaining structures.
 
 ---
 
@@ -276,9 +274,9 @@ To solve **both** problems (memory overhead and double memory access latency), s
      - On a **TLB Miss**, hardware/OS walks the multi-level page table and caches the translation into the TLB for future locality hits.
 
 #### IN DETAIL
-The Mem Team actually bumped into the **two classic crises of naive paging**:
-1. **Crisis 1 (Space Blowup — 800 MB wasted!)**: Every single tiny `hello world` process was getting an 8 MB flat table covering all 4 GB of empty virtual space! **Multi-level paging** acts like a collapsible folder tree—if a process only uses 10 MB of code and stack, you only allocate page-table folders for those 10 MB, saving >99% of that 800 MB!
-2. **Crisis 2 (Time Blowup — 2× or 3× slower RAM!)**: Multi-level paging would actually make memory accesses *even slower* (3 RAM lookups instead of 2) if you walked the tree every time! The **TLB** saves the day: it's an ultra-fast hardware speed-dial right inside the CPU that remembers recent translations so 99% of accesses skip page tables completely!
+Large virtual address spaces with small page sizes expose both **page-table memory explosion** and **double memory-access latency** simultaneously:
+- **Space Scaling Problem ($800\text{ MB}$ metadata)**: A single-level flat array pre-allocates PTEs across the entire $2^{32}$ virtual space ($2^{21}$ entries $\times 4\text{ B} = 8\text{ MB}$ per process $\times 100 = 800\text{ MB}$), even when processes actively touch tiny sparse stack/heap regions separated by gigabytes of empty virtual addresses. **Multi-level hierarchical paging** allocates inner leaf tables *only* for populated virtual branches, cutting metadata footprints from megabytes to tens of kilobytes per process.
+- **Latency Amortization via TLB**: Adding page-table tree depth worsens worst-case walk cost from $2$ to $k+1$ DRAM reads per access; an associative hardware **TLB** exploits spatial/temporal locality to bypass the multi-level walk on $>98\%$ of memory references.
 
 ---
 
@@ -309,17 +307,9 @@ The Mem Team actually bumped into the **two classic crises of naive paging**:
      - Outer (Level 1) to Inner (Level 6) split: **$2 \mid 10 \mid 10 \mid 10 \mid 10 \mid 10 \mid 12$** (or $10|10|10|10|10|2|12$; top level needs only $2^2 = 4$ entries = $16\text{ bytes} \le 4\text{ KB}$, fitting easily into a single page!).
 
 #### IN DETAIL
-Why do we split a 64-bit page table into levels? A flat page table for $2^{52}$ pages $\times 4\text{ bytes}$ would take **$2^{54}\text{ bytes}$ (16 Million Terabytes!)** per process—obviously impossible!
-
-Instead, we build a tree where **every node of the tree fits inside one 4 KB page**:
-- Since $1\text{ page} = 4096\text{ bytes}$ and each entry is $4\text{ bytes}$, one page holds $4096 / 4 = 1024 = 2^{10}$ entries.
-- That means each level consumes **$10\text{ bits}$** of the 52-bit Virtual Page Number:
-  - 1 level covers $10$ bits
-  - 2 levels cover $20$ bits
-  - 3 levels cover $30$ bits
-  - 4 levels cover $40$ bits
-  - 5 levels cover $50$ bits (still $2$ bits short of $52$! If we stopped at 5 levels, the top level would need $2^{12} = 4096$ entries = $16\text{ KB}$, which is **4 pages**, violating the requirement that the top-level table fits in 1 page!).
-  - **6 levels** cover up to $60$ bits ($\ge 52$), with the top level using just $2$ bits ($4$ entries = $16\text{ bytes} \le 4\text{ KB}$). Hence **6 levels** are required!
+Multi-level page-tree depth $L$ arises directly from forcing each individual sub-page table node to fit cleanly within **one physical page frame** (preventing contiguous multi-frame page-table allocation):
+- **Branching Factor per Level**: A $4\text{ KB}$ frame ($2^{12}\text{ B}$) storing $4\text{ B}$ ($2^2\text{ B}$) PTEs holds exactly $2^{12}/2^2 = 2^{10} = 1024$ entries, consuming **$10\text{ bits}$** of virtual page number index per level.
+- **Why Naive 64-Bit Trees Reach 6 Levels**: Subtracting $12$ offset bits leaves $52$ VPN bits ($\lceil 52 / 10 \rceil = 6$ sequential DRAM lookups per TLB miss!). To prevent $6$-deep pointer-chasing penalties in practice, modern $64$-bit ISAs (x86-64, ARM64) restrict canonical virtual addresses to **$48\text{ bits}$** (4-level paging) or **$57\text{ bits}$** (5-level paging) using $8\text{ B}$ PTEs ($9\text{ bits}$ per level).
 
 ---
 
@@ -360,13 +350,9 @@ Given: Virtual Address = $44\text{ bits}$, Page/Frame Size = $64\text{ KB} = 2^{
      $$65,536 + 4 + 1 = \mathbf{65,541\text{ frames}}$$
 
 #### IN DETAIL
-Look how neatly the numbers click together:
-- **Offset**: $64\text{ KB} = 2^{16} \implies 16$ bits. That leaves $44 - 16 = \mathbf{28}$ bits for the Virtual Page Number (**$2^{28}$ pages**).
-- **One frame** holds $64\text{ KB} / 4\text{ B} = 16,384 = \mathbf{2^{14}}$ entries! And $28 / 2 = \mathbf{14}$! So the 28-bit VPN divides symmetrically into **$14\text{ bits} \mid 14\text{ bits}$**, meaning *both* the Outer Page Directory and every Inner Page Table fit neatly into exactly 1 page frame ($64\text{ KB}$)!
-- For a **$4\text{ GB}$ ($2^{32}\text{ B}$) program**:
-  - Data needs $2^{32} / 2^{16} = 65,536$ frames.
-  - Since 1 inner page table maps $16,384$ pages, mapping $65,536$ pages needs $65,536 / 16,384 = \mathbf{4}$ inner page-table frames.
-  - Plus **1** outer page-directory frame pointing to those 4 inner tables!
-  - Total = $65,536 + 4 + 1 = \mathbf{65,541\text{ frames}}$!
+Virtual-to-physical tree geometry balances two independent dimensional constraints: **intra-page branching capacity** and **global physical frame count**:
+- **Index Bit Partitioning**: With $64\text{ KB} = 2^{16}\text{ B}$ pages and $4\text{ B} = 2^2\text{ B}$ PTEs, one page table node holds $2^{14}$ entries ($14$ bits). Subtracting $16$ offset bits from a $44$-bit virtual address leaves exactly $28$ VPN bits, splitting symmetrically into two $14$-bit levels ($L_1 = 14$, $L_2 = 14$, Offset $= 16$) so both outer directory and inner leaf tables occupy exact single $64\text{ KB}$ frames.
+- **Large-Page Trade-off (Internal Fragmentation vs. Metadata)**: Coarse $64\text{ KB}$ pages dramatically collapse page-table depth and enlarge TLB coverage ($\text{TLB entries} \times 64\text{ KB}$), reducing capacity misses; however, each $4\text{ GB}$ footprint occupies $2^{16} = 65,536$ frames while small allocations suffer increased **internal fragmentation** inside the trailing frame.
 
 ---
+

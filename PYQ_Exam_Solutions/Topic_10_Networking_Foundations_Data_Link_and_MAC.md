@@ -37,9 +37,9 @@
 | **Architecture Layer** | Focuses on **interconnecting autonomous computers** so they can exchange packets/messages over communication links. | Built **on top of a computer network** as a unified software abstraction layer (e.g., WWW, HDFS, cloud clusters). |
 
 #### IN DETAIL
-As the lecture slide (`OverviewOfNetworking.pptx` Slide 7) states:
-- In a **computer network**, you have a collection of independent computers connected by cables/Wi-Fi, and **you know which machine is which** (you explicitly type `scp file user@192.168.1.5:/tmp`).
-- A **distributed system** puts a software layer *on top of* that computer network so all those machines act like **one single unified computer**—like Google Search or HDFS, where you submit one query or open one file path without ever knowing or caring which physical server out of 10,000 holds your data!
+Although both connect autonomous computing nodes over physical media, the distinction hinges entirely on **system transparency (`OverviewOfNetworking.pptx`)**:
+- **Computer Network**: Exposes independent hardware hosts explicitly to users and applications. Clients must know target identities, invoke explicit remote-transfer protocols (`ssh host`, `scp`, explicit socket endpoints), and manage failures/paths manually across autonomous OS instances.
+- **Distributed System**: Layers unified middleware abstractions *above* a computer network so multiple independent nodes present the **coherent illusion of a single logical system** (single namespace, transparent replication, fault masking, and distributed scheduling, as in HDFS or Google Search), decoupling user tasks from specific physical server locations.
 
 ---
 
@@ -60,8 +60,9 @@ As the lecture slide (`OverviewOfNetworking.pptx` Slide 7) states:
 | **Error & Order Handling** | Memory writes don't corrupt or drop data; ordering is preserved automatically in memory. | Requires framing, CRC/checksums, sequence numbers, ACKs, and retransmissions to recover lost/corrupted/reordered packets. |
 
 #### IN DETAIL
-Notice how the **conceptual problem** is identical—a fast producer feeding a slower consumer across a finite buffer—but the **physical environment** changes everything!
-Inside one OS, RAM is reliable, shared locks work, and data never gets lost in transit. Across a **computer network**, you have no shared memory locks, messages can travel along different paths or get dropped by noisy cables, and hosts run on completely separate clocks—which is why networking adds headers, checksums, ACKs, timeouts, and sequence numbers on top of the exact same producer–consumer flow-control idea!
+While OS **Inter-Process Communication (IPC)** and **Computer Networks** both solve **Producer–Consumer flow coordination across bounded buffers**, replacing reliable shared kernel memory with physical communication links fundamentally alters protocol requirements:
+- **Trusted OS Environment**: Shared-memory/pipe producers share one hardware clock, linearizable DRAM coherence, hardware-verified delivery (zero silent frame corruption or arbitrary reordering), and single-kernel scheduling locks.
+- **Hostile Asynchronous Network**: Packets traverse shared noisy cables and heterogeneous intermediate queues without shared physical memory or global clocks. Frames can suffer bit-flips (requiring **CRC checksums**), drop inside congested switches (requiring **sequence numbers, ACKs, and retransmission timers**), arrive out-of-order across multipath routes, or overwhelm slow receivers lacking OS spinlock backpressure (requiring explicit **sliding-window flow control**).
 
 ---
 
@@ -78,7 +79,9 @@ Inside one OS, RAM is reliable, shared locks work, and data never gets lost in t
 - **Justification**: In a layered architecture, lower layer $k-1$ provides services upward to layer $k$, and layer $k$ provides its service interface solely to layer $k+1$ above it. Therefore, changing the service interface exported by layer $k$ requires updating layer $k+1$, while layer $k-1$ below remains completely unaffected.
 
 #### IN DETAIL
-Think of a chef (Layer $k$) buying raw vegetables from a farmer (Layer $k-1$) and serving plated meals to customers (Layer $k+1$): if the chef changes the restaurant menu (changes service exported at Layer $k$), only the customers ($k+1$) have to adapt—the farmer below ($k-1$) still delivers tomatoes the exact same way!
+OSI/TCP-IP protocol layering enforces an asymmetric **vertical interface hierarchy (`Service` vs. `Protocol`)** between adjacent layers:
+- **Upward Service Contract**: Layer $k$ consumes the unchanged **SAP (Service Access Point)** interface exported upward by Layer $k-1$ and constructs an enhanced **service** exported upward exclusively across the $k / (k+1)$ interface to Layer $k+1$.
+- **Why $k-1$ Is Insulated**: Modifying what guarantees or primitives Layer $k$ provides upward (for example, changing Layer 4 Transport from connectionless unreliable UDP to connection-oriented reliable TCP, or updating Layer 3 routing) forces Layer $k+1$ (Application) to adapt its invocation logic—yet Layer $k-1$ (Network/Link) remains completely invariant as long as Layer $k$ continues invoking Layer $k-1$'s existing primitives properly.
 
 ---
 
@@ -95,7 +98,9 @@ Think of a chef (Layer $k$) buying raw vegetables from a farmer (Layer $k-1$) an
 - **Justification**: A traditional **bridge** connects a few multi-host LAN segments using software-based frame inspection, often leaving multiple hosts sharing a collision domain per port. A **switch** connects many individual hosts directly on dedicated **full-duplex hardware (ASIC) ports**, providing wire-speed forwarding, lower latency, higher aggregate bandwidth, and dedicated per-host collision-free links.
 
 #### IN DETAIL
-While both bridges and switches operate at **Layer 2** using backward-learning MAC tables (`OverviewOfNetworking.pptx` Slide 60–63), replacing a traditional software bridge with a switch makes a big practical difference: switches have dozens of dedicated full-duplex ASIC ports (one computer per port $\implies$ zero collisions and simultaneous multi-port parallel forwarding), whereas bridges historically joined shared-bus LAN segments in software!
+Although both **Layer-2 Bridges** and **Ethernet Switches** execute identical Data-Link **backward MAC address learning** and spanning-tree loop avoidance (`OverviewOfNetworking.pptx` Slides 60–63), their internal hardware and collision-domain topology differ radically:
+- **Collision Domain Isolation**: A traditional 2-to-4-port bridge connects shared coax/hub LAN segments where stations behind each port still share half-duplex broadcast segments and contend via CSMA/CD. A modern **switch** dedicates one isolated physical wire directly to each host port (**micro-segmentation**)—reducing every collision domain to a single full-duplex point-to-point link with **zero collisions** (`CSMA/CD` disabled).
+- **Hardware Switching Fabric**: Bridges historically forwarded frames sequentially in CPU software over shared buses, whereas switches use dedicated hardware **ASIC crossbars** enabling simultaneous wire-speed parallel forwarding across independent port pairs.
 
 ---
 
@@ -118,11 +123,10 @@ While both bridges and switches operate at **Layer 2** using backward-learning M
   - **Flow Control**: Limits the sender's maximum unacknowledged in-flight frames to a bounded **sending window size ($W$)** matching the receiver's buffer capacity.
 
 #### IN DETAIL
-Look at what the Physical Layer actually gives the Data Link Layer: just a messy stream of noisy `0`s and `1`s where bits sometimes flip or vanish!
-To turn that raw wire into a clean reliable link between two neighbors, the Data Link Layer solves 3 big problems:
-1. **Framing**: Putting clear `START` and `END` markers around packets (byte/bit stuffing) so the receiver knows where one message stops and the next begins.
-2. **Error Control**: Stamping a **CRC** math check at the end of every frame + demanding numbered receipts (**ACKs**) before deleting old copies!
-3. **Flow Control**: Restricting the sender's **Sliding Window** so it never blasts 1,000 frames into a receiver that only has space for 8!
+The Data Link Layer converts the Physical Layer's raw, unreliable stream of voltage pulses / asynchronous bits into a **framed, error-checked, pace-regulated node-to-node transport abstraction** through three core mechanisms:
+- **Framing**: Physical bit streams have no intrinsic record markers; explicit delimiters (`Flag bytes 0x7E` with **byte stuffing** or bit pattern `01111110` with **zero-bit stuffing** after five `1`s) preserve transparent arbitrary payloads while letting receivers synchronize after noise corruptions.
+- **Error Control (ARQ + CRC)**: Appending polynomial Frame Check Sequence (**CRC**) bits detects burst bit errors reliably, while positive/negative **ACKs + sequence numbers + Retransmission Timers** recover dropped or corrupted frames automatically.
+- **Flow Control (Sliding Window)**: Bounding unacknowledged in-flight frames to the receiver's advertised buffer capacity prevents fast transmitters from overflowing slower link-endpoint NIC buffers.
 
 ---
 
@@ -143,10 +147,9 @@ To turn that raw wire into a clean reliable link between two neighbors, the Data
   2. **Complexity of Timer Tuning**: The link layer must maintain an extra "ACK-hold timer" to determine how long to wait for outgoing reverse data before giving up and sending a standalone ACK frame (hybrid approach).
 
 #### IN DETAIL
-Imagine you and a friend are sending letters back and forth by courier. You receive a package from your friend and want to say *"Got package #4!"*.
-- **Without piggybacking**: You immediately pay a courier to deliver an empty envelope carrying just *"Got #4!"*—wasting an entire delivery trip and envelope!
-- **With piggybacking**: Since you were about to mail back a book anyway, you just write *"P.S. Got #4!"* in the corner of your outgoing package's address label! Free ACK!
-- **The catch**: What if you end up having nothing to mail back for 3 days? If you wait forever to piggyback, your friend panics thinking package #4 was lost and mails it again! That's why real link/TCP protocols use a **hybrid rule**: wait briefly (e.g., a few milliseconds) for outgoing data to piggyback onto; if none appears before the ACK timer expires, send a standalone ACK frame immediately!
+**Piggybacking** reduces per-frame overhead on **bidirectional full-duplex links** by collapsing reverse control acknowledgments directly into outgoing data headers:
+- **Protocol Framing Efficiency**: On an active link where Node $A$ and Node $B$ exchange data in both directions (`Frame = [Preamble | MAC Header | Seq# | Ack# | Payload | FCS]`), every standalone control `ACK` frame still pays full physical/link overhead—preamble synchronization, SFD, L2 header fields, CRC trailer, inter-frame gap, and shared-channel acquisition contention—just to deliver a 2-byte sequence acknowledgment. Piggybacking reuses the `Ack#` header field already present in normal reverse data frames for free, effectively doubling link efficiency under symmetric traffic.
+- **The Timer Dilemma ($T_{\text{ack\_hold}} \ll T_{\text{RTO}}$)**: Piggybacking stalls whenever reverse traffic turns **asymmetric or idle** at the receiver (`B`). Waiting indefinitely for outgoing reverse payload causes Sender `A`'s **Retransmission Timeout ($T_{\text{RTO}}$)** to expire, forcing duplicate retransmissions and wasting bandwidth. Therefore real protocols (HDLC, IEEE 802.11, TCP Delayed ACK) implement a **bounded hold timer**: start `T_ack_hold` upon frame receipt; if reverse data becomes ready beforehand, attach `Ack#` immediately and cancel the timer—otherwise, when `T_ack_hold` expires safely before $T_{\text{RTO}}$, transmit an explicit standalone `ACK` frame immediately.
 
 ---
 
@@ -165,9 +168,9 @@ Imagine you and a friend are sending letters back and forth by courier. You rece
 | **Complexity & Sequence Numbers** | **Low complexity**: Uses cumulative ACKs and a single sender timer; requires sequence space $\ge W + 1$. | **High complexity**: Requires individual ACKs (or SACKs), per-frame timers, and sequence space $\ge 2W$ (half the sequence space) to avoid wrap-around ambiguity. |
 
 #### IN DETAIL
-Suppose you mail 10 numbered letters (#1 to #10), and Letter #3 gets lost in the rain:
-- **Go-Back-N** is simple-minded at the receiver: when Letters #4–#10 arrive, the receiver shouts *"I'm still waiting for #3!"* and throws #4–#10 into the trash! So you have to re-mail #3, #4, #5, #6, #7, #8, #9, and #10 all over again! Cheap receiver, terrible waste of bandwidth if lines are noisy or very fast/long!
-- **Selective Repeat** puts #4–#10 neatly into a holding shelf (**receiver buffer**) and simply asks: *"Please resend ONLY #3!"* When #3 arrives, it delivers #3–#10 cleanly in order. Saves massive bandwidth, at the cost of extra buffer memory, per-packet timers, and needing twice as many sequence numbers ($2W$) so old buffered packets aren't confused with wrapped-around new ones!
+**Go-Back-N (GBN)** and **Selective Repeat (SR)** present a classic **receiver complexity vs. link-utilization efficiency** trade-off across high Bandwidth-Delay Product (**BDP**) or noisy channels:
+- **Receiver State vs. Re-transmission Waste**: GBN keeps receiver logic trivial ($W_R = 1$, zero out-of-order memory, single cumulative ACK + single base timer), unconditionally discarding *all* frames arriving past a gap (`N+1..N+k`). When links have high bit-error rates or large $B \times \text{RTT}$ windows, one corrupted frame forces re-transmitting an entire pipe full of $W$ already-delivered frames. **Selective Repeat** buffers valid out-of-order frames up to $W_R$, issues selective ACKs/NAKs, and retransmits *only* the lost frame.
+- **Sequence-Space Aliasing Constraint**: Because SR accepts buffered out-of-order frames across an active receive window $[R_{\text{base}}, R_{\text{base}} + W_R - 1]$, ambiguity occurs if the sender retransmits old unacknowledged frames while the receiver advances its window and wraps sequence numbers (`mod 2^k`). Preventing old/new sequence overlap strictly requires **$W_S + W_R \le 2^k \implies W_{\max} = 2^{k-1}$** (only half the sequence space usable, vs. $2^k - 1$ for GBN).
 
 ---
 
@@ -187,9 +190,9 @@ Suppose you mail 10 numbered letters (#1 to #10), and Letter #3 gets lost in the
    - In Slotted ALOHA, frames can only collide if another station transmits in the **exact same slot**—cutting the vulnerable period in half from **$2T$ to $T$** and doubling maximum throughput to $S_{\max} = \frac{1}{e} \approx \mathbf{36.8\%}$.
 
 #### IN DETAIL
-Think of people speaking on a shared walkie-talkie channel, each message taking **1 minute**:
-- In **Pure ALOHA**, you start talking whenever you want. If Alice starts at `12:01:30`, she overlaps and ruins Bob's message if Bob started *anytime* between `12:00:30` and `12:02:30`—a **2-minute vulnerable window** ($2T$)! Almost every message gets clipped at the front or back!
-- In **Slotted ALOHA**, a global clock beeps once every minute (`12:00`, `12:01`, `12:02`...). Everyone is forced to start talking *only* on the beep! Now Bob's message at `12:01` can *only* collide if someone else also starts at `12:01`—cutting partial overlaps completely and shrinking the danger zone from $2T$ to **$1T$**, which mathematically doubles peak channel efficiency from **18.4% to 36.8%**!
+**Pure ALOHA** and **Slotted ALOHA** isolate how **discrete time synchronization** shrinks contention overlap by half on uncoordinated random-access broadcast channels:
+- **Vulnerable Window Proof ($2T$ vs. $T$)**: Consider fixed-duration frames of transmission time $T_{\text{fr}}$. In **Pure ALOHA**, stations transmit asynchronously whenever ready; a frame starting at $t_0$ suffers destructive partial overlap if *any* peer starts in $(t_0 - T_{\text{fr}},\; t_0 + T_{\text{fr}})$—a continuous vulnerable span of **$2 T_{\text{fr}}$**. Enforcing discrete global slot ticks of length $T_{\text{fr}}$ in **Slotted ALOHA** forces transmissions to align strictly with slot boundaries, eliminating partial tail/head collisions so interference occurs *only* if another station generates a frame during the exact same preceding slot—halving the vulnerable interval to **$1 T_{\text{fr}}$**.
+- **Poisson Throughput Derivation**: Under Poisson arrival load $G$ frames per frame-time, $P(\text{0 peers in } 2G) = e^{-2G} \implies S = G e^{-2G}$ peaks at $G = 0.5$ (**$\frac{1}{2e} \approx 18.4\%$**), whereas Slotted ALOHA yields $S = G e^{-G}$ peaking at $G = 1$ (**$\frac{1}{e} \approx 36.8\%$**).
 
 ---
 
@@ -212,9 +215,9 @@ Think of people speaking on a shared walkie-talkie channel, each message taking 
   - Because their retry times are staggered randomly in time, the probability of simultaneous transmissions—and therefore **collisions**—drops sharply, yielding **much higher channel throughput at moderate-to-high traffic loads** (at the minor cost of slightly higher idle-time delay at very low load).
 
 #### IN DETAIL
-Think of two people (B and C) waiting politely outside a single phone booth while Person A is talking:
-- **1-Persistent CSMA**: Both B and C stand with their hands glued to the booth door waiting for A to step out. The split second A opens the door, **both B and C dive into the phone booth at the exact same instant and collide!** Then both have to back out and try again!
-- **Non-Persistent CSMA**: B checks the booth, sees it busy, and decides *"I'll walk around for a random 2 minutes."* C sees it busy and says *"I'll walk around for a random 5 minutes."* When A finishes, B returns first and gets the booth cleanly with **zero collision**! Only when traffic is super light does 1-persistent feel slightly faster; as soon as multiple stations get busy, Non-persistent easily beats 1-persistent!
+Post-carrier-sense contention rules dictate whether multi-station queues synchronize into deterministic collision storms:
+- **Synchronized Queue Collision in 1-Persistent CSMA**: When Station $A$ finishes transmitting on a shared medium, any stations ($B, C, \dots$) that arrived while busy have polled the carrier continuously (`100% persistence`). The instant carrier energy drops, all waiting stations transmit simultaneously with probability $1$, guaranteeing **100% deterministic collision** whenever $\ge 2$ frames accumulated during $A$'s transmission.
+- **Stochastic Decorrelation in Non-Persistent CSMA**: Sensing a busy channel immediately aborts carrier monitoring and draws an independent **random backoff delay** before re-sensing. This decorrelates waiting nodes across time—preventing clustered synchronization upon channel release and sustaining vastly higher throughput under moderate-to-heavy load $G$, trading slightly higher mean access delay under very sparse traffic.
 
 ---
 
@@ -236,9 +239,9 @@ Think of two people (B and C) waiting politely outside a single phone booth whil
   - By introducing probabilistic deferral ($p < 1$, e.g., $p = 0.1$), **$p$-persistent CSMA** spreads contending stations across different time slots, **drastically reducing collision probability and improving channel throughput** while keeping average delay lower than pure non-persistent CSMA.
 
 #### IN DETAIL
-Suppose 5 cars are stopped at a red construction zone (**channel busy**):
-- **1-Persistent CSMA ($p = 1$)**: The exact millisecond the light turns green, all 5 drivers stomp the gas simultaneously—instant 5-car pileup (**100% collision**)!
-- **$p$-Persistent CSMA ($p = 0.2$)**: When the light turns green, each driver flips a weighted coin (20% chance go now, 80% wait 1 second). Usually just **1 lucky driver** goes cleanly while the others hold back a slot, cutting collisions dramatically!
+**$p$-Persistent CSMA** marries continuous carrier awareness with **probabilistic contention damping** on slotted multi-access channels:
+- **Algorithmic Dynamics**: Unlike non-persistent CSMA (which forfeits immediate awareness of exact channel-release ticks by sleeping blindly), ready stations under $p$-persistent CSMA monitor the busy slot boundary continuously. Once idle, each ready station flips an independent Bernoulli trial with transmit probability $p$ and defers one mini-slot with probability $1 - p$.
+- **Load Scaling vs. 1-Persistent**: Setting $p = 1$ collapses directly to 1-persistent CSMA (all $k$ queued stations collide simultaneously on idle release). Choosing small $p$ (satisfying $N_{\text{active}} \cdot p < 1$) ensures typically zero or one station wins any single release slot while idle wasted slots remain short—raising stable peak utilization substantially while bounding access variance.
 
 ---
 
@@ -265,9 +268,8 @@ Suppose 5 cars are stopped at a red construction zone (**channel busy**):
    - Wait with Ethernet repeater/jam budget (standard slot time $51.2\,\mu\text{s}$ at $10\text{ Mbps}$ gives $64\text{ bytes}$); for raw cable propagation alone above: $L_{\min} = 25 \times 10^{-6}\text{ s} \times 10^7\text{ bps} = 250\text{ bits} = \mathbf{31.25\text{ bytes}}$ (rounded up to 32 bytes; Ethernet standard 51.2 $\mu\text{s}$ slot time enforces **512 bits = 64 bytes** minimum frame size! Check with $1\text{ Gbps}$ & $d=200\text{ m}$: $2\tau = 2\,\mu\text{s} \implies L_{\min} = 2\,\mu\text{s} \times 10^9 = 2000\text{ bits} = \mathbf{250\text{ bytes}}$).
 
 #### IN DETAIL
-Why can't classic Ethernet allow tiny 10-byte packets on a long cable?
-- Imagine Station A at one end of a 2.5 km hallway shouts a super short **1-word tweet (`Hi!`)** in 1 second, while it takes **12.5 seconds** for sound to cross the hallway!
-- At $t = 12.4\text{ s}$, Station B at the far end hasn't heard anything yet and shouts too—crashing right into `Hi!`! The crash echo reaches A at $t = 25\text{ s}$, **long after A already stopped talking and walked away thinking delivery succeeded!**
-- Solution: **Keep talking for at least one full round-trip echo time ($2\tau$)** (`L_min = 64 bytes` in IEEE 802.3 Ethernet, padding small packets if needed) so you are guaranteed to still be on the mic if a collision echo comes back!
+**CSMA/CD (IEEE 802.3 Classic Half-Duplex Ethernet)** turns passive physical collision recovery into fast **intra-transmission abort**, anchored mathematically by worst-case signal propagation round-trip time ($2\tau$):
+- **Minimum Frame Size ($L_{\min} \ge 2\tau \cdot R$)**: Suppose Station $A$ at one cable extreme begins transmitting at $t = 0$. Its electrical wavefront takes maximum one-way propagation delay $\tau = d_{\max} / v_{\text{prop}}$ to reach far-end Station $B$. Station $B$ can still perceive an idle wire and transmit right up to $t = \tau - \epsilon$, corrupting the frame; the returning collision interference reaches $A$ at **$t \approx 2\tau$**. For $A$ to still be actively transmitting when collision voltage returns—ensuring it detects collision, emits the $32\text{--}48$-bit **Jam Signal**, and enters **Binary Exponential Backoff** ($[0, 2^{\min(k,10)}-1] \cdot \text{slot}$) rather than misclassifying transmission as successful—every valid Ethernet frame must last at least **$2\tau \cdot R$** bits ($512\text{ bits} = 64\text{ bytes}$ at $10\text{ Mbps}$ over $2500\text{ m}$).
 
 ---
+

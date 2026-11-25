@@ -34,12 +34,9 @@
   2. **Eliminate Unwanted Default Sharing**: By structuring OS data to be **core-private by default** and letting applications explicitly opt into sharing via Corey's abstractions (**Address Ranges, Kernel Cores, and Shares**), the system incurs cache-coherence and TLB-shootdown costs **only when strictly beneficial**—allowing applications like MapReduce to scale cleanly (e.g., 25% faster on 16 cores).
 
 #### IN DETAIL
-Look at the smoking-gun graph on page 2 of the Corey paper (`aos25-10.png`!):
-They ran a simple test where threads on 1 to 16 cores just repeatedly called `dup()` and `close()` on their own private file descriptors. You'd expect 16 cores to be 16× faster, right? Instead, **total throughput CRASHED on Linux as more cores were added!** Why? Because POSIX forces every thread in a process to share *one* kernel file-descriptor table locked by a single spinlock—so 16 cores spent all their time fighting over cache lines!
-
-Corey's insight is brilliant: **"Stop forcing sharing behind the application's back!"**
-- Make everything **private to 1 core by default** (zero locks, zero cache misses, zero TLB shootdowns!).
-- Hand the steering wheel to the application via three tools: **Address Ranges** (share only the specific memory pages you actually want shared), **Kernel Cores** (dedicate a core to run a device driver without sharing locks), and **Shares** (explicit lookup tables for shared kernel objects).
+The **Corey** many-core OS demonstrated empirically that traditional kernel abstractions bottleneck severely on high core counts ($16+$ cores) due to implicit global hardware sharing:
+- **Coherence Cost of Implicit Sharing**: Conventional kernels maintain single global tables (open file descriptor arrays, shared virtual address-space page-fault locks, global buffer caches). Even non-overlapping operations across separate cores ping-pong shared cache lines (`RFO` invalidations) and contend for global spinlocks—causing aggregate throughput in Linux `mmap`/`munmap`/socket microbenchmarks to peak early and collapse as cores scale.
+- **Application-Managed Sharing Primitives**: Corey exposes three kernel mechanisms—**Address Ranges** (explicitly scoped virtual address regions), **Kernel Cores** (pinning kernel data/execution cleanly to dedicated cores), and **Shares** (opt-in dynamic lookup-table containers)—allowing applications to share OS metadata *only* across cores that explicitly request sharing, letting unshared operations scale nearly linearly.
 
 ---
 
@@ -57,10 +54,9 @@ Corey's insight is brilliant: **"Stop forcing sharing behind the application's b
   2. **Batching & Pipelining**: Explicit messages can be pipelined and batched asynchronously over the interconnect, achieving higher throughput and lower interconnect congestion than synchronous shared-memory lock contention.
 
 #### IN DETAIL
-This sounds paradoxical at first—*"Wait, how can packing and sending a message be cheaper than simply reading a shared RAM variable?!"*
-In Section 2.4 of the **Barrelfish** paper, the authors ran a famous experiment on a 16-core AMD machine:
-- **Shared memory**: Every time Core 5 modifies a shared variable, hardware cache coherence stalls Core 5 while sending invalidation traffic across the chip interconnect to 15 other caches! On 16 cores, a tiny update jumped from ~30 cycles to **~12,000 cycles**!
-- **Message passing**: Instead of 16 cores dragging the same cache line back and forth like a tug-of-war rope, 1 core owns the data structure permanently in its blazing-fast local L1 cache, and other cores send compact 64-byte messages (which can even be **pipelined**!). Result: **far less interconnect traffic and better multicore scaling!**
+**Barrelfish**'s principle (*"Messages cost less than shared memory"*) follows directly from physical interconnect behavior in modern heterogeneous NUMA / many-core processors:
+- **Hidden Hardware Messaging Inside Shared Memory**: A normal shared-memory lock update does *not* execute directly in RAM—under the hood, CPU cache-coherence hardware already sends broadcast/directory **probe, invalidation, and ownership-transfer messages** across inter-socket links (UPI/QPI/Infinity Fabric) plus stalls cores on serialization barriers (`MFENCE`). As core count grows, implicit coherence traffic scales superlinearly across shared cache lines.
+- **Explicit Message-Passing Multikernel Architecture**: Barrelfish structures the OS as a distributed system of independent per-core kernels (*CPU drivers + Monitors*) sharing zero global mutable kernel state; cross-core updates (like page-table shootdowns or capability transfers) travel via batched, cache-line-aligned asynchronous hardware/ring-buffer messages that overlap communication latency, exploit spatial NUMA locality, and tolerate heterogeneous ISAs cleanly.
 
 ---
 
@@ -87,9 +83,9 @@ In Section 2.4 of the **Barrelfish** paper, the authors ran a famous experiment 
    - **Hardware-Assisted Virtualization (Intel VT-x / AMD-V)**: Adds two distinct CPU operating modes (**VMX Root** for VMM, **VMX Non-Root** for Guest OS) so any sensitive guest operation triggers an automatic hardware **`VM-Exit`** trap (run unmodified guests natively).
 
 #### IN DETAIL
-Suppose a Guest OS running inside a VM executes `cli` or `POPF` (*"turn off CPU interrupts while I update my kernel queue!"*):
-- A Guest OS must **never** disable the real physical server's interrupts (otherwise one VM could freeze every other customer on the server!). Under ideal **Trap-and-Emulate**, executing `POPF` in non-privileged guest mode triggers a hardware **trap** so the VMM pretends to disable *only that VM's virtual interrupts*.
-- On classic x86, `POPF` simply did nothing silently without trapping! **Binary Translation** scanned and rewrote binary instructions dynamically; **Paravirtualization (Xen)** edited Linux to politely ask Xen via hypercalls; and **Intel VT-x / AMD-V** finally fixed the CPU silicon itself with Root vs. Non-Root modes!
+Virtual Machine Monitors (**VMMs**) achieve hardware isolation across three deployment architectures and two CPU virtualization models:
+- **Popek–Goldberg Theorem**: Classical **Trap-and-Emulate** works without binary modification iff every **sensitive instruction** (reading/writing CPU mode, control registers, or interrupt flags) is strictly a subset of **privileged instructions** (instructions guaranteed to trap when invoked below `Ring 0`).
+- **The Classic x86 Virtualization Hole & Modern Fixes**: Legacy 32-bit x86 violated Popek–Goldberg—instructions like `POPF` (failing silently to modify `IF` when in User Mode) or `SGDT`/`SIDT` (leaking physical host descriptor addresses silently without trapping) forced **Binary Translation** (scanning guest kernel code at runtime and rewriting unsafe opcodes, e.g., early VMware) or **Paravirtualization** (modifying guest source code to invoke explicit hypercalls, e.g., Xen) until Intel **VT-x** and AMD-V added dedicated **VMX Root vs. Non-Root** hardware execution modes that cleanly intercept sensitive guest actions via **VM Exits**.
 
 ---
 
@@ -119,10 +115,9 @@ Xen divides system execution across **4 hardware privilege levels (Rings 0–3)*
    - *Examples*: Executing standard application computations (`gcc`, web server logic); invoking user-space system calls (`write()`, `malloc()`) that trap into the Guest OS in Ring 1.
 
 #### IN DETAIL
-Look at why standard 2-mode hardware wasn't enough for **Xen** (`xen.pdf`):
-- In normal Linux without virtualization, Linux sits in **Ring 0** (god mode) and user apps sit in **Ring 3**.
-- When Xen runs *multiple* Guest OSes on one physical server, Xen **cannot** put a Guest Linux kernel in **Ring 0**, or that guest could steal other VMs' memory or crash the whole physical server! And Xen **cannot** put the Guest Linux kernel in **Ring 3**, or the Guest's own user apps could tamper with the Guest Linux kernel!
-- Luckily, x86 already had **Ring 1** sitting unused! So Xen keeps **Ring 0** for itself, drops Guest OS kernels into **Ring 1** (replacing sensitive hardware instructions with safe **hypercalls** to Xen), leaves **Ring 2** empty, and keeps Guest apps in **Ring 3**!
+Traditional OSes require only **two hardware privilege domains** (Kernel Mode `Ring 0` vs. User Mode `Ring 3`), whereas **Xen Paravirtualization** exploits x86's four protection rings to preserve **two distinct security boundaries** simultaneously without hardware virtualization extensions:
+- **Dual Isolation Requirement**: The Xen Hypervisor (`VMM`) must maintain sole absolute authority over physical MMU page tables, interrupts, and DMA hardware (**Ring 0**), preventing *any* guest OS from compromising host isolation or neighboring VMs. Simultaneously, each Guest OS kernel must remain strictly isolated from its own untrusted user applications.
+- **Ring De-Privileging & Ring Compression**: Xen leaves `Ring 0` exclusively for the hypervisor, relocates the paravirtualized Guest OS kernel down to **`Ring 1`** (so privileged guest attempts trap cleanly into Xen or invoke fast `int 0x82` **Hypercalls**), and leaves Guest user applications in **`Ring 3`** (keeping `Ring 2` optionally for guest middleware or unused), enforcing full hypervisor-to-guest AND kernel-to-user isolation inside native x86 segment/ring protection.
 
 ---
 
@@ -145,12 +140,10 @@ Look at why standard 2-mode hardware wasn't enough for **Xen** (`xen.pdf`):
    - **Dynamic Load Balancing & Power Consolidation (via Live Migration)**: Underutilized servers can have their live VMs migrated onto fewer physical machines during low traffic (letting empty servers power down), and overloaded hotspots can be rebalanced seamlessly without service outages.
 
 #### IN DETAIL
-Before Virtual Machines, every enterprise app got its own physical server sitting at 10% CPU utilization—massive electricity, space, and money wasted!
-Cloud platforms (AWS/Azure/GCP) exploit these four VM superpowers together:
-- **Multiplexing**: Packs 20 virtual tenants onto 1 physical server safely.
-- **Provisioning**: Clones a fresh server image in seconds when demand spikes.
-- **Suspension**: Freezes idle VMs onto disk like hibernating a laptop, freeing RAM for busy neighbors.
-- **Live Migration**: Slides a live, running VM seamlessly from an overheating or lightly loaded host onto another host with sub-second pause—letting data centers consolidate workloads and power off empty racks automatically!
+Cloud infrastructure management builds directly upon four fundamental properties unlocked by **encapsulating an entire machine's CPU, memory, and virtual disk state inside software abstractions**:
+- **Multiplexing**: Time-slicing and spatial partitioning allow a hypervisor to consolidate multiple underutilized OS workloads onto one physical server with strict fault and performance isolation.
+- **Suspension & Snapshotting**: Because every piece of virtual machine execution state (vCPU registers, device buffers, virtual RAM, disk blocks) lives in hypervisor-accessible software structures, a VM can be serialized cleanly to disk and resumed identically hours later or cloned (`Provisioning`).
+- **Live Migration**: Encapsulation lets a VMM copy guest memory and virtual device state across a data-center network while the VM remains executing on the source host, resuming seamlessly on the target host with millisecond downtime.
 
 ---
 
@@ -172,10 +165,9 @@ Cloud platforms (AWS/Azure/GCP) exploit these four VM superpowers together:
 3. **Memory Ballooning**: A lightweight **balloon driver** inside the Guest OS allocates pinned dummy pages inside the guest (forcing the *Guest OS* to swap out its own least-recently-used pages), then hands those freed physical frames back to the VMM for other VMs.
 
 #### IN DETAIL
-Think of moving a live call-center office into another building **without hanging up active phone calls**:
-- Instead of shutting the office down for 10 minutes (**cold migration**), workers stay at their desks while movers photocopy all filing cabinets to the new building (**Pre-Copy**).
-- Only pages modified while copying get re-photocopied in fast follow-up passes until just a single folder remains.
-- Everyone freezes for **30 milliseconds** (**Stop-and-Copy**), walks across the street, shouts *"Send our mail to Building 2 now!"* (**Gratuitous ARP**), and keeps talking without callers ever noticing!
-Meanwhile, **Memory Ballooning** works because the Hypervisor can't tell *which* pages inside a Guest VM are idle vs. vital kernel buffers—so it inflates a tiny helper driver *inside* the Guest OS, tricking the Guest's own virtual memory manager into gracefully giving back its least-useful pages!
+**Iterative Pre-Copy Live Migration** achieves sub-50 ms VM relocation across physical hosts without interrupting active TCP connections or guest OS execution:
+- **Dirty-Page Rate vs. Network Bandwidth ($w < B_{\text{net}}$)**: During Phase 1, the VMM marks all guest pages clean in the hypervisor's **shadow/EPT page tables** via write-protection traps (`dirty-page logging`) and copies initial RAM asynchronously over the LAN. Concurrent guest writes re-dirty a working subset ($W$). Subsequent iterations copy only newly dirtied pages from the preceding round, converging swiftly as long as page dirtying rate stays well below link bandwidth.
+- **Stop-and-Copy Convergence Bound**: Once remaining dirty pages drop below a small threshold (or max rounds elapse), Phase 2 momentarily pauses guest vCPUs, transfers final vCPU registers, device states, and remaining dirty pages ($T_{\text{downtime}} = V_{\text{final}} / B_{\text{net}}$), and emits a **Gratuitous ARP** broadcast updating Top-of-Rack Layer-2 switch MAC tables toward the destination host before resuming execution. *(Hypervisor memory subsystems coordinate via **EPT/NPT** nested two-dimensional paging to avoid VM exits on guest page-table updates and **Memory Ballooning** drivers to reclaim idle guest pages dynamically.)*
 
 ---
+
